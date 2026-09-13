@@ -41,12 +41,6 @@ set(HAL_COMMON_SOURCES
             "hal/common/usb_virtual_disk.cc"
             "hal/common/adc_battery_monitor.cc"
             )
-# Product and diagnostic applications (including the AI home launcher).
-file(GLOB APP_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/apps/*/*.cc
-)
-list(APPEND SOURCES ${APP_SOURCES})
-
 list(APPEND SOURCES ${HAL_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/hal/common)
 
