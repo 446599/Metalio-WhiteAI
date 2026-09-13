@@ -18,4 +18,3 @@ dependencies:
   idf:
     version: '>=5.5.2'
   espressif/cjson: '*'
-  lvgl/lvgl: ^9.0.0
