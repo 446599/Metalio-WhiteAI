@@ -300,7 +300,7 @@ lv_obj_t* AppLauncher::Create() {
         {"AI 今日摘要", FONT_AWESOME_MICROCHIP_AI, OpenAi},
         {"今日日程", FONT_AWESOME_CALENDAR, OpenCalendar},
         {"当前天气", FONT_AWESOME_CLOUD_SUN, OpenWeather},
-        {"Codex 用量", FONT_AWESOME_CHART_SIMPLE, OpenAi},
+        {"Codex 用量", FONT_AWESOME_SIGNAL, OpenAi},
         {"继续阅读", FONT_AWESOME_GLASSES, OpenReader},
         {"设置卡片", FONT_AWESOME_GEAR, OpenSettings},
     };
