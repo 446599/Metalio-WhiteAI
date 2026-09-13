@@ -248,6 +248,17 @@ lv_obj_t* CreateApps() {
     lv_obj_t* subheading = Label(body, "常用工具与阅读入口", SmallFont());
     lv_obj_set_style_text_color(subheading, lv_color_black(), 0);
     lv_obj_set_style_margin_bottom(subheading, 18, 0);
+    // AI 桌面摘要：先显示本地快照，网络适配器接入后通过事件刷新。
+    lv_obj_t* summary = lv_obj_create(body);
+    lv_obj_remove_style_all(summary);
+    lv_obj_set_size(summary, lv_pct(100), 92);
+    lv_obj_align(summary, LV_ALIGN_TOP_MID, 0, 0);
+    CardStyle(summary, lv_color_black());
+    lv_obj_t* summary_title = Label(summary, "AI 今日摘要", SmallFont(), lv_color_white());
+    lv_obj_align(summary_title, LV_ALIGN_TOP_LEFT, 18, 12);
+    lv_obj_t* summary_text = Label(summary, "准备好迎接今天 · 暂无重要事项", SmallFont(), lv_color_white());
+    lv_obj_align(summary_text, LV_ALIGN_BOTTOM_LEFT, 18, -14);
+
     lv_obj_t* grid = lv_obj_create(body);
     lv_obj_remove_style_all(grid);
     lv_obj_set_width(grid, lv_pct(100));
@@ -304,10 +315,21 @@ lv_obj_t* AppLauncher::Create() {
         {"继续阅读", FONT_AWESOME_GLASSES, OpenReader},
         {"设置卡片", FONT_AWESOME_GEAR, OpenSettings},
     };
+    // AI 桌面摘要：先显示本地快照，网络适配器接入后通过事件刷新。
+    lv_obj_t* summary = lv_obj_create(body);
+    lv_obj_remove_style_all(summary);
+    lv_obj_set_size(summary, lv_pct(100), 92);
+    lv_obj_align(summary, LV_ALIGN_TOP_MID, 0, 0);
+    CardStyle(summary, lv_color_black());
+    lv_obj_t* summary_title = Label(summary, "AI 今日摘要", SmallFont(), lv_color_white());
+    lv_obj_align(summary_title, LV_ALIGN_TOP_LEFT, 18, 12);
+    lv_obj_t* summary_text = Label(summary, "准备好迎接今天 · 暂无重要事项", SmallFont(), lv_color_white());
+    lv_obj_align(summary_text, LV_ALIGN_BOTTOM_LEFT, 18, -14);
+
     lv_obj_t* grid = lv_obj_create(body);
     lv_obj_remove_style_all(grid);
     lv_obj_set_size(grid, lv_pct(100), 3 * 142 + 2 * kGap);
-    lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, 28);
+    lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, 106);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_style_pad_row(grid, kGap, 0);
     lv_obj_set_style_pad_column(grid, kGap, 0);
