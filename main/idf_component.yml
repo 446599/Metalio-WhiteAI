@@ -1,0 +1,21 @@
+## IDF Component Manager Manifest File — Metalio E-Ink 4 hardware test
+dependencies:
+  espressif/esp_io_expander_tca95xx_16bit: ^2.0.0
+  espressif/iot_eth: ^0.1.0
+  espressif/button: ~4.1.3
+  espressif/esp_lcd_touch_cst816s: ^1.0.6
+  espressif/esp_mmap_assets: '>=1.2'
+  espressif/adc_battery_estimation: ^0.2.0
+  espressif/zlib: '*'
+  # ESP-IDF 6 moved MQTT out of the IDF tree; esp-ml307 still includes mqtt.h.
+  espressif/mqtt: ^1.0.0
+
+  espressif/esp_tinyusb:
+    version: ^2.0.0
+    rules:
+    - if: target in [esp32s3]
+
+  idf:
+    version: '>=5.5.2'
+  espressif/cjson: '*'
+  lvgl/lvgl: ^9.0.0
