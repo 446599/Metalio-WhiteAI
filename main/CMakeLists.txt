@@ -4,6 +4,10 @@ set(SOURCES
             "audio/codecs/dummy_audio_codec.cc"
             "display/display.cc"
             "display/raw_display.cc"
+            "display/font/ai_ui_assets.c"
+            "dashboard/dashboard_data.cc"
+            "dashboard/dashboard_service.cc"
+            "xiaozhi/xiaozhi_client.cc"
             "hal/hal.cc"
             "hal/hal_ble_scan.cc"
             "system_info.cc"
@@ -19,6 +23,7 @@ set(INCLUDE_DIRS
             "display"
             "display/font"
             "display/screen"
+            "dashboard"
             "audio"
             "hal"
             )
@@ -63,6 +68,7 @@ idf_component_register(SRCS ${SOURCES}
                              esp_driver_i2c
                              esp_driver_spi
                              esp_driver_uart
+                             esp_driver_usb_serial_jtag
                              esp_driver_ledc
                              esp_driver_i2s
                              esp_driver_sdmmc
