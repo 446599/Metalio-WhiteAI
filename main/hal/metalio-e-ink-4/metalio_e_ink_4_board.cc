@@ -619,9 +619,14 @@ private:
                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
                     const unsigned min_free_kb = static_cast<unsigned>(
                         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024);
+                    // Largest contiguous internal block: the audio task stacks
+                    // are allocated from internal RAM, so this is the number
+                    // that decides whether a new audio task can start.
+                    const unsigned largest_kb = static_cast<unsigned>(
+                        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
                     ESP_LOGI(kMonitorTag,
-                             "@@@内存  | 剩余: %6u KB | 历史最小: %6u KB",
-                             free_kb, min_free_kb);
+                             "@@@内存  | 剩余: %6u KB | 历史最小: %6u KB | 最大连续: %6u KB",
+                             free_kb, min_free_kb, largest_kb);
 
                     // ---- 电池电量（BQ27220）----
                     auto& gauge = Bq27220Gauge::GetInstance();

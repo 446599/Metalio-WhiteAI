@@ -39,12 +39,27 @@ constexpr uint8_t kAudioPacketTypeOpus = 0;
 // BinaryProtocol2 is {version_be16, type_be16, reserved_u32, timestamp_u32,
 // payload_size_be32}; kept for deployments that select protocol version 2.
 constexpr size_t kAudioHeaderV2Bytes = 16;
-// libopus keeps large working sets on the caller's stack: a 24 KiB task that
-// only opens the codecs and encodes one frame already overflowed.  The numbers
-// below are sized from the high-water marks reported by XIAOZHI_AUDIO_TEST?.
-constexpr int kCaptureStackBytes = 40960;
+// libopus keeps large working sets on the caller's stack, so these sizes come
+// from measured high-water marks rather than guesses.
+//
+// The capture task peaks at 21940 bytes (XIAOZHI_STATS cap_stack), so the
+// original 40 KiB was oversized and held internal RAM the playback task could
+// not get: at TTS time only 16 KiB stayed contiguous, the 24 KiB playback
+// stack failed to allocate, and the speaker stayed silent. 28 KiB keeps a
+// 6.7 KiB margin over the observed peak while leaving room for playback.
+constexpr int kCaptureStackBytes = 28672;
 constexpr int kPlaybackStackBytes = 24576;
 constexpr UBaseType_t kAudioTaskPriority = 4;
+
+// These stacks must stay in internal RAM: the audio path reaches NVS
+// (AudioCodec::Start reads the stored volume) and the Opus codec, and any code
+// that runs with the flash cache disabled asserts when the current task stack
+// lives in PSRAM. Freeing internal RAM is therefore the only way to make room.
+BaseType_t CreateAudioTask(TaskFunction_t entry, const char* name, uint32_t stack_bytes,
+                           void* arg, UBaseType_t priority, TaskHandle_t* handle)
+{
+    return xTaskCreatePinnedToCore(entry, name, stack_bytes, arg, priority, handle, 1);
+}
 constexpr uint32_t kIdleWaitMs = 200;
 // Ten empty 500 ms queue reads: a TTS window that produced no audio at all.
 constexpr uint32_t kPlaybackIdleCloseTicks = 10;
@@ -397,11 +412,14 @@ bool AudioSession::StartCapture() {
 bool AudioSession::EnsureCaptureTask() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (capture_task_ == nullptr) {
-        if (xTaskCreatePinnedToCore(CaptureTaskEntry, "xz_capture", kCaptureStackBytes, this,
-                                    kAudioTaskPriority, &capture_task_, 1) != pdPASS) {
+        if (CreateAudioTask(CaptureTaskEntry, "xz_capture", kCaptureStackBytes, this,
+                            kAudioTaskPriority, &capture_task_) != pdPASS) {
             capture_task_ = nullptr;
-            ESP_LOGE(kTag, "capture task creation failed, largest internal block=%u",
-                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+            ESP_LOGE(kTag,
+                     "capture task creation failed, internal free=%u largest=%u psram free=%u",
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
             return false;
         }
     }
@@ -447,10 +465,14 @@ bool AudioSession::EnsurePlaybackTask() {
             return false;
         }
         if (playback_task_ == nullptr) {
-            if (xTaskCreatePinnedToCore(PlaybackTaskEntry, "xz_playback", kPlaybackStackBytes, this,
-                                        kAudioTaskPriority, &playback_task_, 1) != pdPASS) {
+            if (CreateAudioTask(PlaybackTaskEntry, "xz_playback", kPlaybackStackBytes, this,
+                                kAudioTaskPriority, &playback_task_) != pdPASS) {
                 playback_task_ = nullptr;
-                ESP_LOGE(kTag, "playback task creation failed");
+                ESP_LOGE(kTag,
+                         "playback task creation failed, internal free=%u largest=%u psram free=%u",
+                         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
                 return false;
             }
         }
@@ -1124,8 +1146,7 @@ bool AudioSession::RunAudioTestTask(bool downlink_loop, std::string* detail) {
         return fail("no_memory");
     }
     const BaseType_t created =
-        xTaskCreatePinnedToCore(SelfTestTaskEntry, "xz_audiotest", kSelfTestStackBytes, &job,
-                                3, nullptr, 1);
+        CreateAudioTask(SelfTestTaskEntry, "xz_audiotest", kSelfTestStackBytes, &job, 3, nullptr);
     if (created != pdPASS) {
         vSemaphoreDelete(job.done);
         return fail("task_create");
