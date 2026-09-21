@@ -1,0 +1,13 @@
+menu "Metalio Hardware Test"
+
+choice BOARD_TYPE
+    prompt "Board Type"
+    default BOARD_TYPE_METALIO_E_INK_4
+    help
+        Board type. 开发板类型
+    config BOARD_TYPE_METALIO_E_INK_4
+        bool "Metalio E-Ink 4"
+        depends on IDF_TARGET_ESP32S3
+endchoice
+
+endmenu

@@ -1,0 +1,374 @@
+#ifndef IO_EXPANDER_HPP
+#define IO_EXPANDER_HPP
+
+#include <atomic>
+#include <cstdint>
+#include <initializer_list>
+
+#include <driver/i2c_master.h>
+#include <esp_io_expander.h>
+#include <esp_io_expander_tca95xx_16bit.h>
+#include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+
+// ---------------------------------------------------------------------------
+// IOExpander — thin singleton around TCA9555 (esp_io_expander_tca95xx_16bit)
+//
+// io_index: 0..7 = P0.0..P0.7, 8..15 = P1.0..P1.7
+// 原理图网名 P11/P13 指 Port1 的 bit1/bit3（即 P1.1 / P1.3），
+// 对应 io_index = 8+1=9、8+3=11；切勿把「P11」当成 io_index=11。
+//
+// 输入读做短时缓存：iot_button 默认 5ms 轮询且音量+/- 各读一次，
+// 不缓存会对同一 I2C 总线（触摸/电量计共用）造成过高负载，偶发 timeout。
+// ---------------------------------------------------------------------------
+class IOExpander {
+public:
+    enum class Pin : uint8_t {
+        SCREEN_SOCKET_PWR = 0,  // P0.5 — 屏幕卡座供电
+        MAIN_PWR,               // P0.6 — 总电源
+        PA,                     // P0.4 — 音频功放开关
+        PA_SWITCH,              // P0.1 — 功放切换：1=4G 通话，0=ESP32
+        VOLUME_DOWN,            // P0.7 — 音量减按键（输入）
+        VOLUME_UP,              // P1.0 — 音量加按键（输入）
+        TOUCH_RST,              // P1.1 / 原理图 P11 — 触摸 CST816 RST（低有效）
+        PWR_KEY_PULSE,          // P1.3 / 原理图 P13 — 开关机脉冲输出
+        ACCEL_INT,              // P1.4 — 加速度计 INT（输入）
+        kPinCount,
+    };
+
+    enum class Direction : uint8_t {
+        kOutput = 0,
+        kInput  = 1,
+    };
+
+    struct PinMapEntry {
+        Pin       pin;
+        uint8_t   io_index;
+        Direction direction = Direction::kOutput;
+    };
+
+    static constexpr PinMapEntry kDefaultPinMap[] = {
+        {Pin::SCREEN_SOCKET_PWR, 5, Direction::kOutput},  // P0.5
+        {Pin::MAIN_PWR,          6, Direction::kOutput},  // P0.6
+        {Pin::PA,                4, Direction::kOutput},  // P0.4
+        {Pin::PA_SWITCH,         1, Direction::kOutput},  // P0.1
+        {Pin::VOLUME_DOWN,       7, Direction::kInput},   // P0.7
+        {Pin::VOLUME_UP,         8, Direction::kInput},   // P1.0
+        {Pin::TOUCH_RST,         9, Direction::kOutput},  // P1.1 / 原理图 P11 — 触摸 RST
+        {Pin::PWR_KEY_PULSE,    11, Direction::kOutput},  // P1.3 / 原理图 P13 — 关机脉冲
+        {Pin::ACCEL_INT,        12, Direction::kInput},   // P1.4
+    };
+
+    static IOExpander& getInstance()
+    {
+        static IOExpander instance;
+        return instance;
+    }
+
+    IOExpander(const IOExpander&)            = delete;
+    IOExpander& operator=(const IOExpander&) = delete;
+
+    static const char* PinName(Pin pin)
+    {
+        switch (pin) {
+            case Pin::SCREEN_SOCKET_PWR: return "SCREEN_SOCKET_PWR";
+            case Pin::MAIN_PWR:          return "MAIN_PWR";
+            case Pin::PA:                return "PA";
+            case Pin::PA_SWITCH:         return "PA_SWITCH";
+            case Pin::VOLUME_DOWN:       return "VOLUME_DOWN";
+            case Pin::VOLUME_UP:         return "VOLUME_UP";
+            case Pin::TOUCH_RST:         return "TOUCH_RST";
+            case Pin::PWR_KEY_PULSE:     return "PWR_KEY_PULSE";
+            case Pin::ACCEL_INT:         return "ACCEL_INT";
+            default:                     return "?";
+        }
+    }
+
+    static const char* DirectionName(Direction d)
+    {
+        return d == Direction::kInput ? "IN" : "OUT";
+    }
+
+    esp_err_t setPinMap(std::initializer_list<PinMapEntry> map)
+    {
+        if (map.size() == 0) {
+            ESP_LOGE(TAG, "Invalid pin map");
+            return ESP_ERR_INVALID_ARG;
+        }
+        clearPinMap();
+        for (const auto& entry : map) {
+            assignPin(entry);
+        }
+        return ESP_OK;
+    }
+
+    esp_err_t begin(i2c_master_bus_handle_t i2c_bus,
+                    uint32_t dev_addr = ESP_IO_EXPANDER_I2C_TCA9555_ADDRESS_000)
+    {
+        if (!hasAnyPin()) {
+            applyDefaultPinMap();
+        }
+        return beginImpl(i2c_bus, dev_addr);
+    }
+
+    esp_err_t setLevel(Pin pin, uint8_t level)
+    {
+        if (!initialized_ || handle_ == nullptr) {
+            ESP_LOGE(TAG, "Not initialized");
+            return ESP_ERR_INVALID_STATE;
+        }
+        const PinSlot* slot = lookupSlot(pin);
+        if (slot == nullptr) {
+            logUnknownPin(pin);
+            return ESP_ERR_NOT_FOUND;
+        }
+        if (slot->direction != Direction::kOutput) {
+            ESP_LOGW(TAG, "setLevel(%s) ignored: pin is input", PinName(pin));
+            return ESP_ERR_INVALID_STATE;
+        }
+        const uint32_t mask = 1U << static_cast<uint32_t>(slot->io_index);
+        return esp_io_expander_set_level(handle_, mask, level ? 1 : 0);
+    }
+
+    esp_err_t setLevel(Pin pin, bool high)
+    {
+        return setLevel(pin, static_cast<uint8_t>(high ? 1 : 0));
+    }
+
+    esp_err_t getLevel(Pin pin, uint8_t* level)
+    {
+        if (!initialized_ || handle_ == nullptr) {
+            ESP_LOGE(TAG, "Not initialized");
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (level == nullptr) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        const PinSlot* slot = lookupSlot(pin);
+        if (slot == nullptr) {
+            logUnknownPin(pin);
+            return ESP_ERR_NOT_FOUND;
+        }
+        const uint32_t mask = 1U << static_cast<uint32_t>(slot->io_index);
+        uint32_t value = 0;
+        const esp_err_t ret = readInputCached(&value);
+        if (ret == ESP_OK) {
+            *level = (value & mask) ? 1 : 0;
+        }
+        return ret;
+    }
+
+    bool isInitialized() const { return initialized_; }
+    esp_io_expander_handle_t handle() const { return handle_; }
+
+    // 4G 起模组等场景暂停输入 I2C 读，轮询方继续用缓存电平。
+    void SetInputPollingPaused(bool paused) { input_polling_paused_.store(paused); }
+    bool IsInputPollingPaused() const { return input_polling_paused_.load(); }
+
+private:
+    static constexpr const char* TAG = "IOExpander";
+    static constexpr uint8_t kUnmapped = 0xFF;
+    static constexpr size_t kPinCountValue = static_cast<size_t>(Pin::kPinCount);
+    // 音量键 5ms 轮询：缓存 20ms，两键共享一次 I2C 读
+    static constexpr TickType_t kInputCacheTtlTicks = pdMS_TO_TICKS(20);
+    // 失败后冷却须大于驱动 I2C 超时(~1s)，避免立刻重试刷屏
+    static constexpr TickType_t kInputFailBackoffTicks = pdMS_TO_TICKS(2000);
+
+    struct PinSlot {
+        uint8_t   io_index  = kUnmapped;
+        Direction direction = Direction::kOutput;
+    };
+
+    IOExpander()
+    {
+        clearPinMap();
+        input_mutex_ = xSemaphoreCreateMutex();
+    }
+
+    void applyDefaultPinMap()
+    {
+        clearPinMap();
+        for (const auto& entry : kDefaultPinMap) {
+            assignPin(entry);
+        }
+    }
+
+    void clearPinMap()
+    {
+        for (auto& slot : pin_to_slot_) {
+            slot = PinSlot{};
+        }
+    }
+
+    void assignPin(const PinMapEntry& entry)
+    {
+        const size_t idx = static_cast<size_t>(entry.pin);
+        if (idx >= kPinCountValue || entry.io_index >= 16) {
+            ESP_LOGE(TAG, "Invalid pin map entry");
+            return;
+        }
+        pin_to_slot_[idx] = PinSlot{entry.io_index, entry.direction};
+    }
+
+    bool hasAnyPin() const
+    {
+        for (const auto& slot : pin_to_slot_) {
+            if (slot.io_index != kUnmapped) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const PinSlot* lookupSlot(Pin pin) const
+    {
+        const size_t idx = static_cast<size_t>(pin);
+        if (idx >= kPinCountValue) {
+            return nullptr;
+        }
+        const PinSlot& slot = pin_to_slot_[idx];
+        return slot.io_index == kUnmapped ? nullptr : &slot;
+    }
+
+    void logUnknownPin(Pin pin) const
+    {
+        ESP_LOGE(TAG, "Pin '%s' not present in map", PinName(pin));
+    }
+
+    void buildDirectionMasks(uint32_t* output_mask, uint32_t* input_mask) const
+    {
+        uint32_t out = 0;
+        uint32_t in  = 0;
+        for (size_t i = 0; i < kPinCountValue; ++i) {
+            const PinSlot& slot = pin_to_slot_[i];
+            if (slot.io_index == kUnmapped) {
+                continue;
+            }
+            const uint32_t bit = 1U << slot.io_index;
+            if (slot.direction == Direction::kInput) {
+                in |= bit;
+            } else {
+                out |= bit;
+            }
+        }
+        *output_mask = out;
+        *input_mask  = in;
+    }
+
+    esp_err_t readInputCached(uint32_t* value)
+    {
+        if (value == nullptr) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (input_mutex_ != nullptr) {
+            xSemaphoreTake(input_mutex_, portMAX_DELAY);
+        }
+
+        const TickType_t now = xTaskGetTickCount();
+        esp_err_t ret = ESP_OK;
+
+        if (input_polling_paused_.load()) {
+            // 暂停期间不打 I2C，沿用缓存（默认高=未按下）
+            *value = input_cache_value_;
+            ret = ESP_OK;
+        } else if (input_cache_valid_ && (now - input_cache_tick_) < kInputCacheTtlTicks) {
+            *value = input_cache_value_;
+            ret = ESP_OK;
+        } else if (input_fail_until_ != 0 && now < input_fail_until_) {
+            // 冷却期内沿用上次成功值，避免反复打 I2C/刷错误日志
+            *value = input_cache_value_;
+            ret = ESP_OK;
+        } else {
+            uint32_t raw = 0;
+            ret = esp_io_expander_get_level(handle_, 0xFFFFu, &raw);
+            // 须用 I2C 返回后的 tick：驱动超时约 1s，用调用前 now 会导致 200ms 退避立刻过期
+            const TickType_t after = xTaskGetTickCount();
+            if (ret == ESP_OK) {
+                input_cache_value_ = raw;
+                input_cache_tick_ = after;
+                input_cache_valid_ = true;
+                input_fail_until_ = 0;
+                *value = raw;
+            } else {
+                input_fail_until_ = after + kInputFailBackoffTicks;
+                if (input_cache_valid_) {
+                    *value = input_cache_value_;
+                    ret = ESP_OK;
+                    const TickType_t since_log = after - input_fail_log_tick_;
+                    if (input_fail_log_tick_ == 0 || since_log >= pdMS_TO_TICKS(5000)) {
+                        input_fail_log_tick_ = after;
+                        ESP_LOGW(TAG, "TCA9555 input read timeout, using cache (bus busy?)");
+                    }
+                }
+            }
+        }
+
+        if (input_mutex_ != nullptr) {
+            xSemaphoreGive(input_mutex_);
+        }
+        return ret;
+    }
+
+    esp_err_t beginImpl(i2c_master_bus_handle_t i2c_bus, uint32_t dev_addr)
+    {
+        if (i2c_bus == nullptr) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (handle_ != nullptr) {
+            ESP_LOGW(TAG, "already initialized");
+            return ESP_OK;
+        }
+
+        esp_err_t ret = esp_io_expander_new_i2c_tca95xx_16bit(i2c_bus, dev_addr, &handle_);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "TCA9555 init failed: %s", esp_err_to_name(ret));
+            handle_ = nullptr;
+            return ret;
+        }
+
+        uint32_t output_mask = 0;
+        uint32_t input_mask  = 0;
+        buildDirectionMasks(&output_mask, &input_mask);
+
+        if (output_mask != 0) {
+            ret = esp_io_expander_set_dir(handle_, output_mask, IO_EXPANDER_OUTPUT);
+            if (ret != ESP_OK) {
+                return ret;
+            }
+            ret = esp_io_expander_set_level(handle_, output_mask, 0);
+            if (ret != ESP_OK) {
+                return ret;
+            }
+        }
+
+        if (input_mask != 0) {
+            ret = esp_io_expander_set_dir(handle_, input_mask, IO_EXPANDER_INPUT);
+            if (ret != ESP_OK) {
+                return ret;
+            }
+        }
+
+        initialized_ = true;
+        ESP_LOGI(TAG, "TCA9555 ready addr=0x%02lx out=0x%04lx in=0x%04lx",
+                 (unsigned long)dev_addr,
+                 (unsigned long)output_mask,
+                 (unsigned long)input_mask);
+        return ESP_OK;
+    }
+
+    PinSlot pin_to_slot_[kPinCountValue];
+    esp_io_expander_handle_t handle_ = nullptr;
+    bool initialized_ = false;
+
+    SemaphoreHandle_t input_mutex_ = nullptr;
+    uint32_t input_cache_value_ = 0xFFFFu;  // 默认高=未按下（低有效）
+    TickType_t input_cache_tick_ = 0;
+    TickType_t input_fail_until_ = 0;
+    TickType_t input_fail_log_tick_ = 0;
+    bool input_cache_valid_ = false;
+    std::atomic<bool> input_polling_paused_{false};
+};
+
+#endif  // IO_EXPANDER_HPP

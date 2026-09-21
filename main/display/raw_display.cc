@@ -1,16 +1,31 @@
 #include "raw_display.h"
+#include "binary_refresh.h"
+#include "font/raw_font.h"
+#include "font/text_layout.h"
+#include "application.h"
+#include "xiaozhi/conversation.h"
 
 #include "board.h"
 #include "dashboard/dashboard_data.h"
 #include "dashboard/dashboard_service.h"
 #include "esp_lcd_ssd1677_commands.h"
 #include "esp_lcd_panel_ssd1677.h"
+#include "hal/hal.h"
+#include "hal/metalio-e-ink-4/config.h"
+#include "settings.h"
+#include "xiaozhi/xiaozhi_audio.h"
+#include "xiaozhi/xiaozhi_activation.h"
 #include "xiaozhi/xiaozhi_client.h"
+#include "reminders/reminder_service.h"
+#include "reminders/presentation.h"
+#include "notes/note_service.h"
 #include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "hal/usb_serial_jtag_ll.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -33,9 +48,29 @@ constexpr int kPanelH = 480;
 constexpr int kPortraitW = 480;
 constexpr int kPortraitH = 800;
 constexpr uint8_t kWhite = 0xff;
-// Match EegoRead's proven cadence: DU for normal frames, with an occasional
-// GC pass to re-establish charge/history and clear accumulated ghosting.
-constexpr uint32_t kFullRefreshEvery = 8;
+
+// Reset cause is kept on the RTC domain, so a crash that predates the serial
+// session can still be read back from the stats command.
+const char* ResetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "poweron";
+        case ESP_RST_EXT: return "ext";
+        case ESP_RST_SW: return "sw";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "int_wdt";
+        case ESP_RST_TASK_WDT: return "task_wdt";
+        case ESP_RST_WDT: return "wdt";
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO: return "sdio";
+        case ESP_RST_USB: return "usb";
+        case ESP_RST_JTAG: return "jtag";
+        case ESP_RST_EFUSE: return "efuse";
+        case ESP_RST_PWR_GLITCH: return "pwr_glitch";
+        case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
+        default: return "unknown";
+    }
+}
 constexpr int kTestButtonX = 28;
 constexpr int kTestButtonW = kPortraitW - 56;
 constexpr int kTestButtonH = 92;
@@ -311,25 +346,39 @@ uint16_t BuildPaperMonoTriLut(uint8_t out[112], bool background_topup = true) {
 constexpr uint8_t kSegments[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66,
                                    0x6d, 0x7d, 0x07, 0x7f, 0x6f};
 
-// Product UI geometry from the shared portrait specification.  The legacy
-// dashboard below keeps its 32 px editorial grid so old screenshots and
-// serial diagnostics remain reproducible; new product pages use this 16 px
-// grid and a fixed 2x2 action footer.
-constexpr int kUiInset = 16;
+// Product layout: one 32 px safe area, quiet rules and generous line spacing.
+// Rendering and touch routing share these bounds. The legacy dashboard and
+// diagnostic waveforms below retain their original geometry.
+constexpr int kUiInset = 32;
 constexpr int kUiContentWidth = kPortraitW - kUiInset * 2;
-constexpr int kUiStatusHeight = 40;
-constexpr int kUiTitleY = 56;
-constexpr int kUiBodyY = 120;
-constexpr int kUiBodyHeight = 504;
-constexpr int kUiFooterY = 640;
-constexpr int kUiFooterButtonWidth = 216;
-constexpr int kUiFooterButtonHeight = 64;
-constexpr int kUiFooterGap = 16;
-constexpr int kUiFooterX[2] = {kUiInset, kUiInset + kUiFooterButtonWidth + kUiFooterGap};
-constexpr int kUiFooterRowY[2] = {kUiFooterY, kUiFooterY + kUiFooterButtonHeight + kUiFooterGap};
-constexpr int kUiListRowHeight = 64;
-constexpr int kUiListRowGap = 8;
-constexpr int kUiCardStroke = 2;
+constexpr int kUiTitleY = 72;
+constexpr int kUiBodyY = 144;
+constexpr int kUiRowPitch = 80;
+constexpr int kUiRowHeight = 72;
+constexpr int kUiCardPitch = 96;
+constexpr int kUiCardHeight = 88;
+constexpr int kUiRailY = 752;
+constexpr int kUiHomeX[2] = {32, 248};
+constexpr int kUiHomeY[2] = {296, 464};
+constexpr int kUiHomeW = 200;
+constexpr int kUiHomeH = 144;
+constexpr int kUiHomeNavY = 664;
+constexpr int kUiHomeNavH = 64;
+constexpr int kAiActionY[2] = {616, 680};
+constexpr int kAiActionX[2] = {32, 248};
+constexpr int kAiActionW = 200;
+constexpr int kAiActionH = 48;
+constexpr int kAiLinesPerPage = 7;
+
+constexpr int ProductRowAt(int x, int y, int count, int pitch, int height) {
+    if (x < kUiInset || x >= kUiInset + kUiContentWidth || y < kUiBodyY ||
+        y >= kUiBodyY + count * pitch || (y - kUiBodyY) % pitch >= height) return -1;
+    return (y - kUiBodyY) / pitch;
+}
+
+constexpr int kTouchVirtualKeyMinY = kPortraitH;
+constexpr int kTouchVirtualKeyMaxY = 980;
+constexpr int kTouchVirtualKeyTolerance = 88;
 
 constexpr int kMargin = 32;
 constexpr int kContentWidth = kPortraitW - kMargin * 2;
@@ -369,23 +418,23 @@ uint32_t FrameCrc32(const uint8_t* data, size_t size) {
 }
 
 bool SerialWriteAll(int fd, const char* data, size_t size) {
-    if (fd < 0 || data == nullptr) return false;
-    size_t offset = 0;
-    int stalled = 0;
-    while (offset < size && stalled < 2000) {
-        const ssize_t written = ::write(fd, data + offset, size - offset);
-        if (written > 0) {
-            offset += static_cast<size_t>(written);
-            stalled = 0;
-            continue;
-        }
-        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            return false;
-        }
-        ++stalled;
-        vTaskDelay(pdMS_TO_TICKS(1));
+    if (fd < 0 || data == nullptr || !usb_serial_jtag_is_driver_installed()) return false;
+    // VFS reports the requested byte count even when its per-character timeout
+    // drops data. Use the driver's actual count and serialize complete protocol
+    // lines with the default printf logger.
+    struct OutputLock {
+        OutputLock() { flockfile(stdout); }
+        ~OutputLock() { funlockfile(stdout); }
+    } lock;
+    size_t offset=0;
+    const int64_t deadline=esp_timer_get_time()+2000000;
+    while (offset<size && esp_timer_get_time()<deadline) {
+        const int written=usb_serial_jtag_write_bytes(data+offset,std::min(size-offset,size_t(256)),pdMS_TO_TICKS(10));
+        if (written<0) return false;
+        if (written>0) offset+=static_cast<size_t>(written);
+        else vTaskDelay(pdMS_TO_TICKS(1));
     }
-    return offset == size;
+    return offset==size;
 }
 
 uint32_t Utf8Next(const char** cursor) {
@@ -444,6 +493,7 @@ RawDisplay* RawDisplay::instance_ = nullptr;
 RawDisplay::RawDisplay(esp_lcd_panel_handle_t panel, esp_lcd_panel_io_handle_t panel_io,
                        esp_lcd_touch_handle_t touch, int width, int height)
     : panel_(panel), panel_io_(panel_io), touch_(touch) {
+    raw_font::Init();
     width_ = width;
     height_ = height;
     portrait_size_ = static_cast<size_t>(kPortraitW / 8) * kPortraitH;
@@ -540,8 +590,17 @@ void RawDisplay::TouchTask() {
             pressed = true;
         }
         if (pressed) {
-            const int x = std::clamp(static_cast<int>(point.x), 0, kPortraitW - 1);
-            const int y = std::clamp(static_cast<int>(point.y), 0, kPortraitH - 1);
+            // The cover exposes three capacitive keys below the visible panel.
+            // CST816S reports those points in the same portrait coordinate
+            // space (y=900 on this board), so keep them out of the framebuffer
+            // hit boxes instead of clamping them onto the last screen row.
+            const int reported_x = static_cast<int>(point.x);
+            const int reported_y = static_cast<int>(point.y);
+            const bool virtual_key = reported_y >= kTouchVirtualKeyMinY &&
+                                     reported_y <= kTouchVirtualKeyMaxY;
+            const int x = std::clamp(reported_x, 0, kPortraitW - 1);
+            const int y = virtual_key ? reported_y
+                                      : std::clamp(reported_y, 0, kPortraitH - 1);
             if (!touch_down_) {
                 touch_down_ = true;
                 touch_start_x_ = touch_last_x_ = x;
@@ -559,17 +618,69 @@ void RawDisplay::TouchTask() {
             const int x = touch_last_x_;
             const int y = touch_last_y_;
             touch_down_ = false;
-            if (tap) HandleHomeTap(x, y);
+            if (tap) {
+                if (touch_start_y_ >= kTouchVirtualKeyMinY &&
+                    touch_start_y_ <= kTouchVirtualKeyMaxY) {
+                    const int home_distance = std::abs(x - static_cast<int>(TOUCH_VK_HOME_X));
+                    const int next_distance = std::abs(x - static_cast<int>(TOUCH_VK_NEXT_X));
+                    const int prev_distance = std::abs(x - static_cast<int>(TOUCH_VK_PREV_X));
+                    if (home_distance <= kTouchVirtualKeyTolerance &&
+                        home_distance <= next_distance && home_distance <= prev_distance) {
+                        Application::GetInstance().ScheduleUi([this]() { HandleHardwareKey(HardwareKey::Home); });
+                    } else if (next_distance <= kTouchVirtualKeyTolerance &&
+                               next_distance <= prev_distance) {
+                        Application::GetInstance().ScheduleUi([this]() { HandleHardwareKey(HardwareKey::Next); });
+                    } else if (prev_distance <= kTouchVirtualKeyTolerance) {
+                        Application::GetInstance().ScheduleUi([this]() { HandleHardwareKey(HardwareKey::Previous); });
+                    }
+                } else {
+                    Application::GetInstance().ScheduleUi([this, x, y]() { HandleHomeTap(x, y); });
+                }
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
+bool RawDisplay::HandleAiKey(bool down) {
+    if (down) {
+        if (xiaozhi::AudioSession::GetInstance().RecorderState().mode != audio::RecorderMode::Idle) return false;
+        if (ai_key_down_.exchange(true)) return true;
+        const bool accepted = xiaozhi::Client::GetInstance().ListenStart();
+        // Queue only visual work. A slow e-paper flush must never delay UP.
+        Application::GetInstance().RequestAiFocus();
+        return accepted;
+    }
+    if (!ai_key_down_.exchange(false)) return false;
+    const bool stopped = xiaozhi::Client::GetInstance().ListenStop();
+    Application::GetInstance().RequestStatusUpdate(true);
+    return stopped;
+}
+
+void RawDisplay::ShowAiConversation() {
+    SetPowerSaveMode(false);
+    DisplayLockGuard lock(this);
+    if (animation_running_.load()) return;
+    screen_test_mode_ = false;
+    test_console_mode_ = false;
+    product_page_ = ProductPage::AiResult;
+    ai_text_page_ = 0;
+    ai_show_transcript_ = voice_note_mode_;
+    DrawHomeScreenLocked();
+    FlushLocked();
+}
+
 void RawDisplay::HandleHomeTap(int x, int y) {
+    if (HandleReminderTap(x,y)) return;
     enum class Action { None, Gray4, PaperMono, PaperText, AnimDu, AnimFc, PaperPage };
     Action action = Action::None;
-    bool ai_tap = false;
-    bool refresh_tap = false;
+    int ai_action = -1;
+    int recorder_action = -1;
+    uint32_t alarm_id = 0;
+    bool alarm_enable = false;
+    const char* voice_notice = nullptr;
+    bool restore_capsule = false;
+    bool confirm_tap = false;
     bool wake = false;
     bool redraw = false;
     {
@@ -589,159 +700,143 @@ void RawDisplay::HandleHomeTap(int x, int y) {
             auto in_rect = [x, y](int left, int top, int width, int height) {
                 return x >= left && x < left + width && y >= top && y < top + height;
             };
-            auto footer_index = [&]() {
-                for (int i = 0; i < 4; ++i) {
-                    const int row = i / 2;
-                    const int column = i % 2;
-                    if (in_rect(kUiFooterX[column], kUiFooterRowY[row],
-                                kUiFooterButtonWidth, kUiFooterButtonHeight)) return i;
-                }
-                return -1;
-            };
-
+            // Content taps share the hardware actions. The passive footer and
+            // the gaps between list rows never activate a selection.
             ProductPage next_page = product_page_;
             switch (product_page_) {
                 case ProductPage::Home: {
-                    const int footer = footer_index();
-                    if (footer == 0) next_page = ProductPage::QuickNote;
-                    else if (footer == 1) next_page = ProductPage::Keep;
-                    else if (footer == 2) next_page = ProductPage::Apps;
-                    else if (footer == 3) {
-                        next_page = ProductPage::AiResult;
-                        ai_tap = true;
-                    } else if (in_rect(kUiInset, kUiBodyY, kUiContentWidth, 248)) {
-                        next_page = ProductPage::AiResult;
-                    } else if (in_rect(kUiInset, 384, kUiContentWidth, 112)) {
-                        next_page = ProductPage::TodayList;
-                    } else if (in_rect(kUiInset, 512, kUiContentWidth, 112)) {
-                        next_page = ProductPage::Reader;
+                    static constexpr ProductPage pages[] = {ProductPage::Alarm, ProductPage::TodayList,
+                        ProductPage::Recorder, ProductPage::AiResult, ProductPage::Apps, ProductPage::More};
+                    for (int i = 0; i < 4; ++i) {
+                        if (in_rect(kUiHomeX[i % 2], kUiHomeY[i / 2], kUiHomeW, kUiHomeH)) next_page = pages[i];
                     }
+                    for (int i = 0; i < 2; ++i) {
+                        if (in_rect(kUiHomeX[i], kUiHomeNavY, kUiHomeW, kUiHomeNavH)) next_page = pages[i + 4];
+                    }
+                    app_parent_ = ProductPage::Home;
+                    if (next_page == ProductPage::AiResult) voice_note_mode_=false;
                     break;
                 }
-                case ProductPage::Apps: {
-                    const int row = (y - kUiBodyY) / (kUiListRowHeight + kUiListRowGap);
-                    if (x >= kUiInset && x < kUiInset + kUiContentWidth &&
-                        row >= 0 && row < 6 &&
-                        y < kUiBodyY + 6 * (kUiListRowHeight + kUiListRowGap) - kUiListRowGap) {
-                        static constexpr ProductPage kAppPages[] = {
-                            ProductPage::Reader, ProductPage::AiResult, ProductPage::QuickNote,
-                            ProductPage::CardBox, ProductPage::Settings, ProductPage::More,
-                        };
-                        next_page = kAppPages[row];
-                    } else {
-                        const int footer = footer_index();
-                        if (footer == 0 || footer == 3) next_page = ProductPage::Home;
-                        else if (footer == 1) next_page = ProductPage::CardBox;
-                        else if (footer == 2) next_page = ProductPage::Settings;
+                case ProductPage::Apps:
+                case ProductPage::More: {
+                    const int count = product_page_ == ProductPage::Apps ? 7 : 4;
+                    const int row = ProductRowAt(x, y, count, kUiRowPitch, kUiRowHeight);
+                    if (row >= 0) {
+                        navigation_index_ = row;
+                        confirm_tap = true;
                     }
                     break;
                 }
                 case ProductPage::AiResult:
-                    if (footer_index() == 0) next_page = ProductPage::CardDetail;
-                    else if (footer_index() == 1) next_page = ProductPage::Keep;
-                    else if (footer_index() == 2) next_page = ProductPage::AiSteps;
-                    else if (footer_index() == 3) next_page = ProductPage::Home;
-                    else if (in_rect(kUiInset, kUiBodyY, kUiContentWidth, 248))
-                        next_page = ProductPage::AiSteps;
-                    break;
                 case ProductPage::AiSteps:
-                    if (footer_index() == 0) next_page = ProductPage::AiResult;
-                    else if (footer_index() == 1) next_page = ProductPage::CardDetail;
-                    else if (footer_index() == 2) next_page = ProductPage::Keep;
-                    else if (footer_index() == 3) next_page = ProductPage::Home;
+                    if (in_rect(344, 72, 104, 48)) ai_action = 4;
+                    else if (in_rect(32, 288, 184, 48)) {
+                        ai_show_transcript_ = !ai_show_transcript_;
+                        ai_text_page_ = 0;
+                        redraw = true;
+                    } else {
+                        for (int row = 0; row < 2; ++row) for (int col = 0; col < 2; ++col) {
+                            if (in_rect(kAiActionX[col], kAiActionY[row], kAiActionW, kAiActionH))
+                                ai_action = row * 2 + col;
+                        }
+                    }
                     break;
-                case ProductPage::QuickNote: {
-                    const int footer = footer_index();
-                    if (footer == 0) {
-                        quick_note_state_ = quick_note_state_ < 1 ? 1 :
-                                            quick_note_state_ == 1 ? 2 : quick_note_state_;
-                        redraw = true;
-                    } else if (footer == 1) {
-                        quick_note_state_ = std::max<uint8_t>(quick_note_state_, 3);
-                        redraw = true;
-                    } else if (footer == 2) next_page = ProductPage::Confirmation;
-                    else if (footer == 3) next_page = ProductPage::Home;
+                case ProductPage::QuickNote:
+                    if (in_rect(kUiInset, 504, kUiContentWidth, 64)) {
+                        restore_capsule = true;
+                        next_page = ProductPage::AiResult;
+                    }
+                    break;
+                case ProductPage::TodayList: {
+                    const auto now = time(nullptr);
+                    if (!reminders::ValidClock(now)) break;
+                    if (in_rect(32,136,64,48) || in_rect(384,136,64,48)) {
+                        calendar_month_ = std::clamp(calendar_month_ + (x < 240 ? -1 : 1), -120, 120);
+                        calendar_day_ = 1; calendar_events_page_ = 0; redraw = true;
+                    } else if (in_rect(44,232,392,264)) {
+                        struct tm month{}; localtime_r(&now,&month);
+                        month.tm_mday=1; month.tm_mon+=calendar_month_; month.tm_hour=month.tm_min=month.tm_sec=0;
+                        const auto first=mktime(&month);
+                        const int lead=(month.tm_wday+6)%7;
+                        struct tm next=month; ++next.tm_mon;
+                        const int days=(mktime(&next)-first)/86400;
+                        const int day=(y-232)/44*7+(x-44)/56-lead+1;
+                        if (day>=1 && day<=days) { calendar_day_=day; calendar_events_page_=0; redraw=true; }
+                    } else if (in_rect(32,688,200,48)) {
+                        next_page=ProductPage::AiResult; voice_notice="按住 AI 键，说出日程与时间";
+                    } else if (in_rect(248,688,200,48)) { ++calendar_events_page_; redraw=true; }
                     break;
                 }
-                case ProductPage::Reader: {
-                    const int footer = footer_index();
-                    if (footer == 0) {
-                        if (reader_page_ > 0) --reader_page_;
-                        redraw = true;
-                    } else if (footer == 1) {
-                        if (reader_page_ < 2) ++reader_page_;
-                        redraw = true;
-                    } else if (footer == 2) next_page = ProductPage::TodayList;
-                    else if (footer == 3) next_page = ProductPage::Home;
+                case ProductPage::Alarm:
+                    for (int row=0;row<4;++row) {
+                        if (alarm_ids_[row] && in_rect(344,160+row*112,104,48)) {
+                            alarm_id=alarm_ids_[row]; alarm_enable=!alarm_enabled_[row];
+                        }
+                    }
+                    if (in_rect(32,600,416,48)) {
+                        next_page=ProductPage::AiResult; voice_notice="按住 AI 键，说出闹钟时间";
+                    } else if (alarm_pages_>1 && in_rect(32,672,200,48)) {
+                        alarm_page_=(alarm_page_+alarm_pages_-1)%alarm_pages_; redraw=true;
+                    } else if (alarm_pages_>1 && in_rect(248,672,200,48)) {
+                        alarm_page_=(alarm_page_+1)%alarm_pages_; redraw=true;
+                    }
+                    break;
+                case ProductPage::Notes: {
+                    const int row=ProductRowAt(x,y,6,kUiRowPitch,kUiRowHeight);
+                    if (row>=0 && note_ids_[row]) {note_id_=note_ids_[row];note_text_page_=0;next_page=ProductPage::NoteDetail;}
+                    else if (in_rect(32,672,200,48)) {next_page=ProductPage::AiResult;voice_note_mode_=false;voice_notice="按住 AI 键，说：帮我保存一条笔记";}
+                    else if (in_rect(248,672,200,48)) {notes_page_=(notes_page_+1)%notes_pages_;navigation_index_=0;redraw=true;}
                     break;
                 }
-                case ProductPage::TodayList:
-                    if (y >= kUiBodyY && y < kUiBodyY + 3 * 76 && x >= kUiInset &&
-                        x < kUiInset + kUiContentWidth) next_page = ProductPage::CardDetail;
-                    else if (footer_index() == 0 || footer_index() == 3) next_page = ProductPage::Home;
-                    else if (footer_index() == 2) next_page = ProductPage::CardBox;
+                case ProductPage::NoteDetail:
+                    if (in_rect(32,672,200,48) && note_text_page_>0) {--note_text_page_;redraw=true;}
+                    else if (in_rect(248,672,200,48) && note_text_page_+1<note_text_pages_) {++note_text_page_;redraw=true;}
                     break;
-                case ProductPage::CardBox:
-                    if (y >= kUiBodyY && y < kUiBodyY + 3 * 88 && x >= kUiInset &&
-                        x < kUiInset + kUiContentWidth) next_page = ProductPage::CardDetail;
-                    else if (footer_index() == 0 || footer_index() == 3) next_page = ProductPage::Home;
-                    else if (footer_index() == 1) next_page = ProductPage::Keep;
+                case ProductPage::Recorder: {
+                    const auto state=xiaozhi::AudioSession::GetInstance().RecorderState();
+                    const bool active=state.mode!=audio::RecorderMode::Idle;
+                    if (in_rect(32,496,416,64)) recorder_action=active ? 0 : 1;
+                    else if (!active && state.has_clip && in_rect(32,584,416,64)) recorder_action=2;
+                    else if (!active && in_rect(32,672,416,64)) {
+                        next_page=ProductPage::AiResult; voice_notice="按住 AI 键录音，松开生成文字笔记";
+                        voice_note_mode_=true; ai_show_transcript_=true;
+                    }
                     break;
-                case ProductPage::CardDetail:
-                    if (footer_index() == 0) next_page = ProductPage::Home;
-                    else if (footer_index() == 1) next_page = ProductPage::Keep;
-                    else if (footer_index() == 2) next_page = ProductPage::QuickNote;
-                    else if (footer_index() == 3) next_page = ProductPage::More;
+                }
+                case ProductPage::Workbench:
+                case ProductPage::Settings:
                     break;
+                case ProductPage::CardBox: {
+                    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+                    int count = 0;
+                    for (const auto& card : snapshot.custom) if (card.enabled) ++count;
+                    for (const auto& summary : snapshot.ai_summary) if (summary[0]) ++count;
+                    if (ProductRowAt(x, y, std::min(count, 3), kUiCardPitch, kUiCardHeight) >= 0)
+                        next_page = ProductPage::CardDetail;
+                    break;
+                }
                 case ProductPage::Keep:
-                    // Any tap wakes the user from the independent snapshot.
                     next_page = ProductPage::Home;
                     break;
-                case ProductPage::Workbench:
-                    if (footer_index() == 0 || footer_index() == 3) next_page = ProductPage::Home;
-                    else if (footer_index() == 1) refresh_tap = true;
-                    else if (footer_index() == 2) next_page = ProductPage::Settings;
-                    break;
-                case ProductPage::Settings:
-                    if (footer_index() == 0 || footer_index() == 3) next_page = ProductPage::Home;
-                    else if (footer_index() == 1) {
-                        // Orientation switching is deferred to the next phase;
-                        // keep the user on the settings page with an explicit
-                        // status message rather than applying stale hitboxes.
-                        redraw = true;
-                    } else if (footer_index() == 2) next_page = ProductPage::Workbench;
-                    break;
+                case ProductPage::Reader:
+                case ProductPage::CardDetail:
                 case ProductPage::Confirmation:
-                    if (footer_index() == 0) next_page = ProductPage::QuickNote;
-                    else if (footer_index() == 1) next_page = ProductPage::TodayList;
-                    else if (footer_index() == 2) next_page = ProductPage::Keep;
-                    else if (footer_index() == 3) next_page = ProductPage::Home;
-                    break;
-                case ProductPage::More:
-                    if (y >= kUiBodyY && y < kUiBodyY + 4 * 82 && x >= kUiInset &&
-                        x < kUiInset + kUiContentWidth) {
-                        const int row = (y - kUiBodyY) / 82;
-                        if (row == 0) next_page = ProductPage::Workbench;
-                        else if (row == 1) {
-                            test_console_mode_ = true;
-                            DrawTestConsoleLocked();
-                            FlushLocked();
-                            return;
-                        } else if (row == 2) refresh_tap = true;
-                        else next_page = ProductPage::Settings;
-                    } else if (footer_index() == 0 || footer_index() == 3) next_page = ProductPage::Home;
-                    else if (footer_index() == 1) next_page = ProductPage::Workbench;
-                    else if (footer_index() == 2) next_page = ProductPage::Settings;
                     break;
             }
             if (next_page != product_page_) {
+                if (product_page_ == ProductPage::Recorder) xiaozhi::AudioSession::GetInstance().StopRecorder();
                 product_page_ = next_page;
+                if (next_page == ProductPage::Recorder) xiaozhi::AudioSession::GetInstance().RestoreRecorder();
+                navigation_index_ = 0;
                 redraw = true;
             }
-            if (redraw) {
-                DrawHomeScreenLocked();
-                FlushLocked();
-            }
+        }
+
+        // HOME from the legacy console or a diagnostic page lands here too;
+        // draw it once after the router has released its page-specific branch.
+        if (redraw && !wake && !test_console_mode_ && !screen_test_mode_) {
+            DrawHomeScreenLocked();
+            FlushLocked();
         }
     }
     if (action == Action::Gray4) {
@@ -772,25 +867,237 @@ void RawDisplay::HandleHomeTap(int x, int y) {
         SetPowerSaveMode(false);
         return;
     }
-    if (ai_tap) {
-        if (!ai_listening_) {
-            if (xiaozhi::Client::GetInstance().ListenStart()) {
-                ai_listening_ = true;
-                ShowNotification("小智开始聆听", 2000);
-            } else {
-                ShowNotification("小智尚未连接", 2500);
+    if (alarm_id) {
+        std::string error;
+        if (!reminders::Service::Instance().SetEnabled(alarm_id,alarm_enable,error))
+            ShowNotification("无法修改，请用语音重新设置时间",3000);
+        else UpdateStatusBar(true);
+    }
+    if (recorder_action >= 0) {
+        auto& audio=xiaozhi::AudioSession::GetInstance();
+        if (recorder_action==0) audio.StopRecorder();
+        else if (!audio.StartRecorder(recorder_action==2)) ShowNotification("音频忙碌，请稍后再试",2000);
+        UpdateStatusBar(true);
+    }
+    if (voice_notice) ShowNotification(voice_notice,5000);
+    if (restore_capsule) xiaozhi::Client::GetInstance().RestoreCapsule();
+    if (ai_action >= 0) {
+        auto& client = xiaozhi::Client::GetInstance();
+        if (ai_action < 3) {
+            if (!client.RunQuickAction(static_cast<xiaozhi::QuickAction>(ai_action))) {
+                ShowNotification("暂不可操作，请等待当前回答或先说话", 4000);
             }
+        } else if (ai_action == 3) {
+            client.SaveCapsule();
         } else {
-            const bool accepted = xiaozhi::Client::GetInstance().ListenStop();
-            ai_listening_ = false;
-            ShowNotification(accepted ? "已发送结束聆听" : "小智连接已断开", 2000);
+            (void)client.Abort();
         }
-        return;
+        UpdateStatusBar(true);
+    }
+    if (confirm_tap) {
+        // Dispatch after releasing the display mutex: the hardware handler
+        // acquires it and may start network/audio work outside its own lock.
+        (void)HandleHardwareKey(HardwareKey::Select);
+    }
+}
+
+bool RawDisplay::HandleHardwareKey(HardwareKey key) {
+    if (reminders::Service::Instance().IsActive()) return true;
+    bool refresh_tap = false;
+    bool wake = false;
+    bool redraw = false;
+    bool handled = false;
+    const char* hardware_notice = nullptr;
+
+    {
+        DisplayLockGuard lock(this);
+        if (!portrait_fb_) return false;
+
+        // The legacy test console owns its own touch geometry.  HOME is still
+        // a useful escape hatch from the cover, while NEXT/PREV only advance
+        // its test variant and never leak into the product router.
+        if (test_console_mode_) {
+            handled = true;
+            if (key == HardwareKey::Home) {
+                test_console_mode_ = false;
+                product_page_ = ProductPage::Home;
+                navigation_index_ = 0;
+                redraw = true;
+            } else if (key == HardwareKey::Next || key == HardwareKey::Previous) {
+                if (key == HardwareKey::Next) ++test_variant_;
+                else test_variant_ = test_variant_ == 0 ? kGrayVariantCount - 1
+                                                        : test_variant_ - 1;
+                DrawTestConsoleLocked();
+                FlushLocked();
+            }
+        } else if (screen_test_mode_) {
+            // A running diagnostic is intentionally not interrupted by a
+            // cover-key tap, except for HOME which returns to the product UI.
+            handled = key == HardwareKey::Home;
+            if (handled) {
+                screen_test_mode_ = false;
+                product_page_ = ProductPage::Home;
+                navigation_index_ = 0;
+                redraw = true;
+            }
+        } else if (power_save_) {
+            handled = true;
+            wake = true;
+        } else {
+            handled = true;
+            auto set_page = [this, &redraw](ProductPage page) {
+                if (product_page_ == page) return;
+                if (product_page_ == ProductPage::Recorder) xiaozhi::AudioSession::GetInstance().StopRecorder();
+                if (product_page_ == ProductPage::Apps || product_page_ == ProductPage::Home) app_parent_ = product_page_;
+                product_page_ = page;
+                if (page == ProductPage::Recorder) xiaozhi::AudioSession::GetInstance().RestoreRecorder();
+                if (page == ProductPage::AiResult) voice_note_mode_=false;
+                navigation_index_ = 0;
+                redraw = true;
+            };
+            auto parent_page = [this, &set_page]() {
+                switch (product_page_) {
+                    case ProductPage::Home: break;
+                    case ProductPage::AiSteps: set_page(ProductPage::AiResult); break;
+                    case ProductPage::CardDetail: set_page(ProductPage::CardBox); break;
+                    case ProductPage::NoteDetail: set_page(ProductPage::Notes); break;
+                    case ProductPage::Confirmation: set_page(ProductPage::QuickNote); break;
+                    case ProductPage::Workbench: set_page(ProductPage::More); break;
+                    case ProductPage::Settings: set_page(ProductPage::More); break;
+                    case ProductPage::More: set_page(ProductPage::Home); break;
+                    case ProductPage::Apps: set_page(ProductPage::Home); break;
+                    default: set_page(app_parent_); break;
+                }
+            };
+            auto open_home_selection = [this, &set_page]() {
+                static constexpr ProductPage pages[] = {ProductPage::Alarm,ProductPage::TodayList,
+                    ProductPage::Recorder,ProductPage::AiResult,ProductPage::Apps,ProductPage::More};
+                set_page(pages[navigation_index_ % 6]);
+            };
+            auto open_app_selection = [this, &set_page]() {
+                static constexpr ProductPage pages[] = {ProductPage::Alarm,ProductPage::TodayList,
+                    ProductPage::Recorder,ProductPage::AiResult,ProductPage::Notes,ProductPage::QuickNote,ProductPage::Reader};
+                set_page(pages[navigation_index_ % 7]);
+            };
+
+            switch (key) {
+                case HardwareKey::Home:
+                    if (product_page_ != ProductPage::Home) {
+                        set_page(ProductPage::Home);
+                    }
+                    break;
+                case HardwareKey::Previous:
+                case HardwareKey::Back:
+                    if (product_page_==ProductPage::NoteDetail && key==HardwareKey::Previous && note_text_page_>0) {
+                        --note_text_page_;redraw=true;
+                    } else if (product_page_ == ProductPage::TodayList && key == HardwareKey::Previous) {
+                        calendar_month_=std::max(-120,calendar_month_-1); calendar_day_=1; calendar_events_page_=0; redraw=true;
+                    } else if (product_page_ == ProductPage::Alarm && alarm_page_>0 && key==HardwareKey::Previous) {
+                        --alarm_page_; redraw=true;
+                    } else if ((product_page_ == ProductPage::AiResult || product_page_ == ProductPage::AiSteps) && ai_text_page_ > 0) {
+                        --ai_text_page_;
+                        redraw = true;
+                    } else if (product_page_ == ProductPage::Reader && reader_page_ > 0) {
+                        --reader_page_;
+                        redraw = true;
+                    } else {
+                        parent_page();
+                    }
+                    break;
+                case HardwareKey::Next:
+                    if (product_page_ == ProductPage::Home) {
+                        navigation_index_ = (navigation_index_ + 1) % 6;
+                        redraw = true;
+                    } else if (product_page_ == ProductPage::Apps) {
+                        navigation_index_ = (navigation_index_ + 1) % 7;
+                        redraw = true;
+                    } else if (product_page_ == ProductPage::Reader) {
+                        if (reader_page_ < 2) {
+                            ++reader_page_;
+                            redraw = true;
+                        }
+                    } else if (product_page_==ProductPage::Notes) {
+                        if (navigation_index_<5 && note_ids_[navigation_index_+1]) ++navigation_index_;
+                        else {notes_page_=(notes_page_+1)%notes_pages_;navigation_index_=0;}
+                        redraw=true;
+                    } else if (product_page_==ProductPage::NoteDetail) {
+                        if (note_text_page_+1<note_text_pages_) {++note_text_page_;redraw=true;}
+                    } else if (product_page_ == ProductPage::QuickNote) {
+                        set_page(ProductPage::AiResult);
+                    } else if (product_page_ == ProductPage::AiResult || product_page_ == ProductPage::AiSteps) {
+                        if (ai_text_page_ + 1 < ai_page_count_) { ++ai_text_page_; redraw = true; }
+                    } else if (product_page_ == ProductPage::TodayList) {
+                        calendar_month_=std::min(120,calendar_month_+1); calendar_day_=1; calendar_events_page_=0; redraw=true;
+                    } else if (product_page_ == ProductPage::Alarm) {
+                        alarm_page_=(alarm_page_+1)%alarm_pages_; redraw=true;
+                    } else if (product_page_ == ProductPage::CardBox) {
+                        set_page(ProductPage::CardDetail);
+                    } else if (product_page_ == ProductPage::CardDetail) {
+                        set_page(ProductPage::Keep);
+                    } else if (product_page_ == ProductPage::Keep) {
+                        set_page(ProductPage::Home);
+                    } else if (product_page_ == ProductPage::More) {
+                        navigation_index_ = (navigation_index_ + 1) % 4;
+                        redraw = true;
+                    } else if (product_page_ == ProductPage::Confirmation) {
+                        set_page(ProductPage::QuickNote);
+                    }
+                    break;
+                case HardwareKey::Select:
+                    if (product_page_ == ProductPage::Home) open_home_selection();
+                    else if (product_page_ == ProductPage::Apps) open_app_selection();
+                    else if (product_page_==ProductPage::Notes && note_ids_[navigation_index_]) {
+                        note_id_=note_ids_[navigation_index_];note_text_page_=0;set_page(ProductPage::NoteDetail);
+                    }
+                    else if (product_page_ == ProductPage::AiResult) { ai_show_transcript_ = !ai_show_transcript_; ai_text_page_ = 0; redraw = true; }
+                    else if (product_page_ == ProductPage::AiSteps) {
+                        // BOOT confirms the highlighted AI plan and stores it
+                        // as a card, matching the old "存卡片" action.
+                        set_page(ProductPage::CardDetail);
+                    } else if (product_page_ == ProductPage::QuickNote) {
+                        set_page(ProductPage::AiResult);
+                    } else if (product_page_ == ProductPage::Reader) {
+                        set_page(ProductPage::Apps);
+                    } else if (product_page_ == ProductPage::CardBox) {
+                        set_page(ProductPage::CardDetail);
+                    } else if (product_page_ == ProductPage::CardDetail) {
+                        set_page(ProductPage::Keep);
+                    } else if (product_page_ == ProductPage::Keep) {
+                        // Any hardware key wakes the keep-screen snapshot.
+                        set_page(ProductPage::Home);
+                    } else if (product_page_ == ProductPage::Confirmation) {
+                        set_page(ProductPage::TodayList);
+                        hardware_notice = "已加入今日清单";
+                    } else if (product_page_ == ProductPage::More) {
+                        switch (navigation_index_ % 4) {
+                            case 0: set_page(ProductPage::Workbench); break;
+                            case 1: refresh_tap = true; break;
+                            case 2: set_page(ProductPage::Settings); break;
+                            default:
+                                test_console_mode_=true; DrawTestConsoleLocked(); FlushLocked(); redraw=false; break;
+                        }
+                    }
+
+                    break;
+            }
+
+        }
+        if (redraw && !wake && !test_console_mode_ && !screen_test_mode_) {
+            DrawHomeScreenLocked();
+            FlushLocked();
+        }
+    }
+
+    if (wake) {
+        SetPowerSaveMode(false);
+        return true;
     }
     if (refresh_tap) {
         dashboard::DashboardService::GetInstance().RefreshNow();
         ShowNotification("正在刷新天气与额度", 2000);
     }
+    if (hardware_notice != nullptr) ShowNotification(hardware_notice, 1800);
+    return handled;
 }
 
 void RawDisplay::FrameDumpTaskEntry(void* arg) {
@@ -803,7 +1110,7 @@ void RawDisplay::FrameDumpTask() {
     // Commands are read from the hardware FIFO so reopening the CDC port does
     // not make a pending TOUCH command disappear through a VFS read error.
     int fd = -1;
-    char command[96] = {};
+    char command[768] = {};
     size_t command_size = 0;
     bool command_overflow = false;
     bool serial_touch_down = false;
@@ -847,12 +1154,43 @@ void RawDisplay::FrameDumpTask() {
     };
     auto tap_is_actionable = [](int x, int y, bool power_save, bool test_mode, bool console_mode) {
         if (power_save || test_mode || console_mode) return true;
+        if (y >= kTouchVirtualKeyMinY && y <= kTouchVirtualKeyMaxY) return true;
         // Product pages reserve the top 40 px for the status bar.  Treat all
         // other in-page taps as candidates and let HandleHomeTap apply the
         // page-specific hit map; this keeps serial touch injection in sync
         // with the physical touch task as new pages are added.
         return x >= kUiInset && x < kUiInset + kUiContentWidth && y >= kUiTitleY &&
                y < kPortraitH;
+    };
+    auto dispatch_cover_key = [this](int x, int y) {
+        if (y < kTouchVirtualKeyMinY || y > kTouchVirtualKeyMaxY) return false;
+        const int home_distance = std::abs(x - static_cast<int>(TOUCH_VK_HOME_X));
+        const int next_distance = std::abs(x - static_cast<int>(TOUCH_VK_NEXT_X));
+        const int prev_distance = std::abs(x - static_cast<int>(TOUCH_VK_PREV_X));
+        if (home_distance <= kTouchVirtualKeyTolerance &&
+            home_distance <= next_distance && home_distance <= prev_distance) {
+            return HandleHardwareKey(HardwareKey::Home);
+        }
+        if (next_distance <= kTouchVirtualKeyTolerance && next_distance <= prev_distance) {
+            return HandleHardwareKey(HardwareKey::Next);
+        }
+        if (prev_distance <= kTouchVirtualKeyTolerance) {
+            return HandleHardwareKey(HardwareKey::Previous);
+        }
+        return false;
+    };
+    auto dispatch_injected_key = [this](const char* name) {
+        if (name == nullptr) return false;
+        if (strcasecmp(name, "HOME") == 0) return HandleHardwareKey(HardwareKey::Home);
+        if (strcasecmp(name, "NEXT") == 0) return HandleHardwareKey(HardwareKey::Next);
+        if (strcasecmp(name, "PREV") == 0 || strcasecmp(name, "PREVIOUS") == 0 ||
+            strcasecmp(name, "BACK") == 0) {
+            return HandleHardwareKey(HardwareKey::Previous);
+        }
+        if (strcasecmp(name, "SELECT") == 0) {
+            return HandleHardwareKey(HardwareKey::Select);
+        }
+        return false;
     };
     auto inject_tap = [&](int x, int y, const char* action) {
         bool power_save = false;
@@ -865,7 +1203,9 @@ void RawDisplay::FrameDumpTask() {
             console_mode = test_console_mode_;
         }
         const bool actionable = tap_is_actionable(x, y, power_save, screen_test, console_mode);
-        if (actionable) HandleHomeTap(x, y);
+        if (actionable) {
+            if (!dispatch_cover_key(x, y)) HandleHomeTap(x, y);
+        }
         send_touch_ack(action, x, y, 0, actionable, false);
     };
     auto release_serial_touch = [&](int x, int y) {
@@ -879,12 +1219,28 @@ void RawDisplay::FrameDumpTask() {
         const int dy = serial_touch_last_y - serial_touch_start_y;
         const int64_t held_us = esp_timer_get_time() - serial_touch_start_us;
         const bool tap = held_us <= 800000 && std::abs(dx) <= 32 && std::abs(dy) <= 32;
-        if (tap) HandleHomeTap(x, y);
+        if (tap) {
+            if (!dispatch_cover_key(x, y)) HandleHomeTap(x, y);
+        }
         send_touch_ack("up", x, y, dx, tap, false);
         serial_touch_down = false;
         serial_touch_start_us = 0;
     };
 
+    // Keep command RX and reply TX on the same buffered driver. No competing
+    // raw FIFO reader is used once its ISR owns the hardware.
+    flockfile(stdout);
+    if (!usb_serial_jtag_is_driver_installed()) {
+        usb_serial_jtag_driver_config_t config{.tx_buffer_size=1024,.rx_buffer_size=1024};
+        const auto result=usb_serial_jtag_driver_install(&config);
+        if (result!=ESP_OK) {
+            funlockfile(stdout);
+            ESP_LOGE(TAG,"serial driver unavailable: %s",esp_err_to_name(result));
+            return;
+        }
+    }
+    usb_serial_jtag_vfs_use_driver();
+    funlockfile(stdout);
     ESP_LOGI(TAG, "serial input ready (FRAME?; TOUCH TAP/CLICK/DOWN/MOVE/UP)");
     while (!frame_dump_stop_) {
         if (fd < 0) {
@@ -924,6 +1280,21 @@ void RawDisplay::FrameDumpTask() {
                         DumpFrameToSerial(fd, false);
                     } else if (strcasecmp(command, "FRAME_PANEL?") == 0) {
                         DumpFrameToSerial(fd, true);
+                    } else if (strcasecmp(command, "FONT?") == 0) {
+                        char response[96];
+                        const int size = std::snprintf(response, sizeof(response),
+                            "@@FONT_ACK ready=%d glyphs=%lu\n", raw_font::Ready() ? 1 : 0,
+                            static_cast<unsigned long>(raw_font::Count()));
+                        if (size > 0) (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                    } else if (strcasecmp(command, "CAPSULE_STATE?") == 0) {
+                        const auto state = xiaozhi::Conversation::GetInstance().Snapshot();
+                        char response[192];
+                        const int size = std::snprintf(response, sizeof(response),
+                            "@@CAPSULE_ACK state=%u turn=%lu transcript_bytes=%u answer_bytes=%u saved=%d held=%d\n",
+                            static_cast<unsigned>(state.state), static_cast<unsigned long>(state.turn),
+                            static_cast<unsigned>(state.transcript.size()), static_cast<unsigned>(state.answer.size()),
+                            state.saved ? 1 : 0, ai_key_down_.load() ? 1 : 0);
+                        if (size > 0) (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
                     } else if (strcasecmp(command, "SCREEN_TEST?") == 0) {
                         ShowScreenTestPattern();
                         send_command_ack("screen_test");
@@ -955,6 +1326,145 @@ void RawDisplay::FrameDumpTask() {
                                strcasecmp(command, "PAGE_TURN_3L?") == 0) {
                         const bool started = StartPaperMonoPageTest();
                         send_command_ack(started ? "paper_page_start" : "anim_busy", started);
+                    } else if (strcasecmp(command, "WIFI_CONFIG?") == 0 ||
+                               strcasecmp(command, "WIFI_SETUP?") == 0) {
+                        // The credential page is served from the device AP, so
+                        // the Wi-Fi password never has to pass through a host
+                        // command or a log line.
+                        if (!GetHAL().IsWifiMode()) {
+                            send_error("wifi_config_needs_wifi_mode");
+                        } else {
+                            // Settings only commits in its destructor, so the
+                            // flag has to leave scope before the reboot.
+                            {
+                                Settings settings("wifi", true);
+                                settings.SetInt("force_ap", 1);
+                            }
+                            send_command_ack("wifi_config_restart");
+                            vTaskDelay(pdMS_TO_TICKS(300));
+                            esp_restart();
+                        }
+                    } else if (strcasecmp(command, "BIND?") == 0 ||
+                               strcasecmp(command, "ACTIVATION?") == 0) {
+                        // The binding code is meant to be read off the panel, so
+                        // reporting it to the paired host console is the same
+                        // information the user already sees.
+                        const xiaozhi::Activation::State state =
+                            xiaozhi::Activation::GetInstance().Snapshot();
+                        char response[256];
+                        const int size = std::snprintf(
+                            response, sizeof(response),
+                            "@@BIND checked=%d code=%s bound=%d challenge=%d time=%d "
+                            "message=%s\n",
+                            state.checked ? 1 : 0, state.has_code ? state.code : "-",
+                            state.bound ? 1 : 0, state.has_challenge ? 1 : 0,
+                            state.has_server_time ? 1 : 0,
+                            state.message[0] != '\0' ? state.message : "-");
+                        if (size > 0) {
+                            (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                        }
+                    } else if (strcasecmp(command, "AI_TEXT?") == 0) {
+                        // Read-only view of the AI card, so a conversation can be
+                        // verified without photographing the panel.  It is the
+                        // same text the dashboard already renders.
+                        const dashboard::Snapshot snapshot =
+                            dashboard::DashboardData::GetInstance().GetSnapshot();
+                        char response[400];
+                        const int size = std::snprintf(
+                            response, sizeof(response),
+                            "@@AI_TEXT status=%s count=%u\n@@AI_LINE 0 %s\n@@AI_LINE 1 %s\n"
+                            "@@AI_LINE 2 %s\n",
+                            snapshot.ai_status, static_cast<unsigned>(snapshot.ai_count),
+                            snapshot.ai_summary[0], snapshot.ai_summary[1],
+                            snapshot.ai_summary[2]);
+                        if (size > 0) {
+                            (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                        }
+                    } else if (strcasecmp(command, "REMINDER_STATE?") == 0) {
+                        const auto response = "@@REMINDER_STATE " +
+                            reminders::Service::Instance().Status() + "\n";
+                        (void)SerialWriteAll(fd, response.data(), response.size());
+                    } else if (strncasecmp(command, "MCP ", 4) == 0) {
+                        // USB-only diagnostics use the same parser/store as the
+                        // server, with a separate retry cache and counters.
+                        const auto reply = reminders::Service::Instance().HandleMcp(command + 4, 0, true);
+                        const auto response = "@@MCP_REPLY " + (reply.empty() ? "null" : reply) + "\n";
+                        (void)SerialWriteAll(fd, response.data(), response.size());
+                    } else if (strcasecmp(command, "XIAOZHI_STATS?") == 0) {
+                        xiaozhi::AudioSessionStats stats =
+                            xiaozhi::AudioSession::GetInstance().Stats();
+                        const auto& client = xiaozhi::Client::GetInstance();
+                        stats.transport_connected = client.IsConnected();
+                        stats.session_ready = client.IsSessionReady();
+                        char response[512];
+                        const int size = std::snprintf(
+                            response, sizeof(response),
+                            "@@XIAOZHI_STATS frames_sent=%lu send_err=%lu recv=%lu dropped=%lu "
+                            "decoded=%lu enc_err=%lu dec_err=%lu in_frames=%lu in_fail=%lu "
+                            "peak=%d up=%d down=%d out=%d frame_ms=%d cap=%d play=%d "
+                            "enc=%d dec=%d gated=%lu opens=%lu params=%d ws=%d sess=%d "
+                            "enabled=%d ver=%d "
+                            "cap_stack=%lu play_stack=%lu heap=%lu psram=%lu reset=%s\n",
+                            static_cast<unsigned long>(stats.frames_sent),
+                            static_cast<unsigned long>(stats.send_errors),
+                            static_cast<unsigned long>(stats.packets_received),
+                            static_cast<unsigned long>(stats.packets_dropped),
+                            static_cast<unsigned long>(stats.packets_decoded),
+                            static_cast<unsigned long>(stats.encode_errors),
+                            static_cast<unsigned long>(stats.decode_errors),
+                            static_cast<unsigned long>(stats.input_frames),
+                            static_cast<unsigned long>(stats.input_failures), stats.input_peak,
+                            stats.uplink_rate, stats.downlink_rate, stats.output_rate,
+                            stats.frame_duration_ms,
+                            stats.capturing ? 1 : 0, stats.playback_open ? 1 : 0,
+                            stats.encoder_open ? 1 : 0, stats.decoder_open ? 1 : 0,
+                            static_cast<unsigned long>(stats.frames_gated),
+                            static_cast<unsigned long>(stats.gate_opens),
+                            stats.params_seen ? 1 : 0, stats.transport_connected ? 1 : 0,
+                            stats.session_ready ? 1 : 0, client.Enabled() ? 1 : 0,
+                            stats.protocol_version,
+                            static_cast<unsigned long>(stats.capture_stack_free),
+                            static_cast<unsigned long>(stats.playback_stack_free),
+                            static_cast<unsigned long>(stats.internal_heap_free),
+                            static_cast<unsigned long>(stats.psram_free),
+                            ResetReasonName(esp_reset_reason()));
+                        if (size > 0) {
+                            (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                        }
+                    } else if (strcasecmp(command, "RECORDER_STATE?") == 0) {
+                        const auto state=xiaozhi::AudioSession::GetInstance().RecorderState();
+                        char response[160];
+                        const int size=std::snprintf(response,sizeof(response),
+                            "@@RECORDER_STATE mode=%u seconds=%lu clip=%d saved=%d failed=%d revision=%lu\n",
+                            static_cast<unsigned>(state.mode),static_cast<unsigned long>(state.seconds),
+                            state.has_clip,state.saved,state.failed,static_cast<unsigned long>(state.revision));
+                        if (size>0) (void)SerialWriteAll(fd,response,static_cast<size_t>(size));
+                    } else if (strcasecmp(command, "XIAOZHI_AUDIO_TEST?") == 0) {
+                        // Mic capture plus a 1 kHz speaker tone; blocks this task
+                        // for a few seconds, so run it while the UI is idle.
+                        std::string detail;
+                        const bool ok =
+                            xiaozhi::AudioSession::GetInstance().SelfTest(&detail);
+                        char response[400];
+                        const int size = std::snprintf(
+                            response, sizeof(response),
+                            "@@XIAOZHI_AUDIO_TEST_ACK ok=%d detail=%s\n", ok ? 1 : 0,
+                            detail.c_str());
+                        if (size > 0) {
+                            (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                        }
+                    } else if (strcasecmp(command, "XIAOZHI_DOWNLINK_TEST?") == 0) {
+                        std::string detail;
+                        const bool ok =
+                            xiaozhi::AudioSession::GetInstance().DownlinkLoopTest(&detail);
+                        char response[400];
+                        const int size = std::snprintf(
+                            response, sizeof(response),
+                            "@@XIAOZHI_DOWNLINK_TEST_ACK ok=%d detail=%s\n", ok ? 1 : 0,
+                            detail.c_str());
+                        if (size > 0) {
+                            (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                        }
                     } else if (strcasecmp(command, "TEST_VERSION_NEXT?") == 0) {
                         {
                             DisplayLockGuard lock(this);
@@ -970,6 +1480,35 @@ void RawDisplay::FrameDumpTask() {
                     } else if (strcasecmp(command, "HOME?") == 0) {
                         ShowProductHomeScreen();
                         send_command_ack("home");
+                    } else if (strncasecmp(command, "KEY ", 4) == 0 ||
+                               strncasecmp(command, "BUTTON ", 7) == 0) {
+                        const size_t prefix = strncasecmp(command, "KEY ", 4) == 0 ? 4U : 7U;
+                        char key_name[24] = {};
+                        char action[24] = {};
+                        const int parsed = std::sscanf(command + prefix, "%23s %23s",
+                                                       key_name, action);
+                        const bool ai_key = strcasecmp(key_name, "BOOT") == 0 || strcasecmp(key_name, "AI") == 0;
+                        if (parsed < 1) {
+                            send_error("key_args");
+                        } else if (ai_key) {
+                            if (strcasecmp(action, "DOWN") == 0 || strcasecmp(action, "PRESS") == 0) {
+                                (void)HandleAiKey(true);
+                                send_command_ack("ai_down");
+                            } else if (strcasecmp(action, "UP") == 0 || strcasecmp(action, "RELEASE") == 0) {
+                                (void)HandleAiKey(false);
+                                send_command_ack("ai_up");
+                            } else {
+                                send_error("ai_requires_down_or_up");
+                            }
+                        } else if (parsed >= 2 && strcasecmp(action, "CLICK") != 0 && strcasecmp(action, "PRESS") != 0) {
+                            send_error("key_args");
+                        } else if (!dispatch_injected_key(key_name)) {
+                            send_error("unsupported_key");
+                        } else {
+                            char ack_name[48];
+                            std::snprintf(ack_name, sizeof(ack_name), "key_%s", key_name);
+                            send_command_ack(ack_name);
+                        }
                     } else if (strcasecmp(command, "STATE?") == 0) {
                         const char* page_name = "home";
                         bool screen_test = false;
@@ -986,7 +1525,7 @@ void RawDisplay::FrameDumpTask() {
                                 case ProductPage::AiSteps: page_name = "ai_steps"; break;
                                 case ProductPage::QuickNote: page_name = "quick_note"; break;
                                 case ProductPage::Reader: page_name = "reader"; break;
-                                case ProductPage::TodayList: page_name = "today_list"; break;
+                                case ProductPage::TodayList: page_name = "calendar"; break;
                                 case ProductPage::CardBox: page_name = "card_box"; break;
                                 case ProductPage::CardDetail: page_name = "card_detail"; break;
                                 case ProductPage::Keep: page_name = "keep"; break;
@@ -995,6 +1534,10 @@ void RawDisplay::FrameDumpTask() {
                                 case ProductPage::Settings: page_name = "settings"; break;
                                 case ProductPage::Confirmation: page_name = "confirmation"; break;
                                 case ProductPage::More: page_name = "more"; break;
+                                case ProductPage::Alarm: page_name = "alarm"; break;
+                                case ProductPage::Recorder: page_name = "recorder"; break;
+                                case ProductPage::Notes: page_name = "notes"; break;
+                                case ProductPage::NoteDetail: page_name = "note_detail"; break;
                             }
                         }
                         char response[160];
@@ -1005,7 +1548,7 @@ void RawDisplay::FrameDumpTask() {
                             power_save ? 1 : 0);
                         if (size > 0) (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
                     } else if (strcasecmp(command, "TOUCH BACK") == 0) {
-                        SetPowerSaveMode(false);
+                        (void)HandleHardwareKey(HardwareKey::Previous);
                         send_touch_ack("back", -1, -1, 0, true, false);
                     } else if (strncasecmp(command, "TOUCH TAP ", 10) == 0 ||
                                strncasecmp(command, "TOUCH CLICK ", 12) == 0) {
@@ -1014,7 +1557,8 @@ void RawDisplay::FrameDumpTask() {
                         char extra = '\0';
                         const size_t prefix = strncasecmp(command, "TOUCH TAP ", 10) == 0 ? 10U : 12U;
                         const int parsed = std::sscanf(command + prefix, "%d %d %c", &x, &y, &extra);
-                        if (parsed != 2 || x < 0 || x >= kPortraitW || y < 0 || y >= kPortraitH) {
+                        if (parsed != 2 || x < 0 || x >= kPortraitW || y < 0 ||
+                            y > kTouchVirtualKeyMaxY) {
                             send_error("touch_tap_args");
                         } else {
                             inject_tap(x, y, prefix == 10U ? "tap" : "click");
@@ -1029,7 +1573,8 @@ void RawDisplay::FrameDumpTask() {
                         int y = 0;
                         char extra = '\0';
                         const int parsed = std::sscanf(command + prefix, "%d %d %c", &x, &y, &extra);
-                        if (parsed != 2 || x < 0 || x >= kPortraitW || y < 0 || y >= kPortraitH) {
+                        if (parsed != 2 || x < 0 || x >= kPortraitW || y < 0 ||
+                            y > kTouchVirtualKeyMaxY) {
                             send_error("touch_state_args");
                         } else if (is_down) {
                             serial_touch_down = true;
@@ -1058,7 +1603,10 @@ void RawDisplay::FrameDumpTask() {
                             "TOUCH DOWN/MOVE/UP x y | TOUCH BACK | SCREEN_TEST? | "
                             "ANIM_TEST? (DU 0x1C) | ANIM_TEST_FC? (0xFC) | "
                             "WAVEFRONT_TEST? | PAPER_MONO_TEST? | PAPER_TEXT_TEST? | "
-                            "PAPER_PAGE_TEST? | HOME?\n";
+                            "PAPER_PAGE_TEST? | XIAOZHI_STATS? | XIAOZHI_AUDIO_TEST? | "
+                            "XIAOZHI_DOWNLINK_TEST? | AI_TEXT? | BIND? | WIFI_CONFIG? | "
+                            "REMINDER_STATE? | MCP {json-rpc} | "
+                            "HOME? | KEY/BUTTON HOME|PREV|NEXT|SELECT CLICK\n";
                         (void)SerialWriteAll(fd, kHelp, sizeof(kHelp) - 1U);
                     } else if (strncasecmp(command, "TOUCH", 5) == 0) {
                         send_error("unknown_input_command");
@@ -1192,37 +1740,16 @@ void RawDisplay::StrokeCircle(int cx, int cy, int radius, int thickness) {
 }
 
 void RawDisplay::DrawTextInk(int x, int y, const char* text, const ui_font_t& font, bool black) {
-    if (text == nullptr || text[0] == '\0' || font.bitmap == nullptr || font.glyphs == nullptr ||
-        font.codepoints == nullptr) return;
+    if (!text) return;
     int cursor = x;
-    const char* p = text;
-    while (*p != '\0') {
-        const uint32_t codepoint = Utf8Next(&p);
-        const ui_glyph_t* glyph = FindGlyph(font, codepoint);
-        if (glyph == nullptr) {
-            cursor += std::max(1, static_cast<int>(font.height / 2));
-            continue;
-        }
-        const int stride = font.bits_per_pixel == 1
-                               ? (static_cast<int>(glyph->width) + 7) / 8
-                               : (static_cast<int>(glyph->width) + 3) / 4;
-        for (int yy = 0; yy < font.height; ++yy) {
-            const uint8_t* row = font.bitmap + glyph->offset + yy * stride;
-            for (int xx = 0; xx < glyph->width; ++xx) {
-                uint8_t level = 0;
-                if (font.bits_per_pixel == 1) {
-                    level = static_cast<uint8_t>((row[xx >> 3] >> (7 - (xx & 7))) & 0x01U);
-                } else if (font.bits_per_pixel == 2) {
-                    const uint8_t packed = row[xx >> 2];
-                    level = static_cast<uint8_t>((packed >> (6 - 2 * (xx & 3))) & 0x03U);
-                }
-                if ((font.bits_per_pixel == 1 && level != 0U) ||
-                    (font.bits_per_pixel == 2 && level >= 2U)) {
-                    SetPixel(cursor + xx, y + yy, black);
-                }
+    while (*text) {
+        const auto glyph = raw_font::Lookup(font, Utf8Next(&text));
+        for (int yy = 0; yy < glyph.height; ++yy) {
+            for (int xx = 0; xx < glyph.width; ++xx) {
+                if (raw_font::Pixel(glyph, xx, yy)) SetPixel(cursor + glyph.x + xx, y + glyph.y + yy, black);
             }
         }
-        cursor += static_cast<int>(glyph->width) + 1;
+        cursor += glyph.advance;
     }
 }
 
@@ -1334,9 +1861,7 @@ int RawDisplay::TextWidth(const char* text, const ui_font_t& font) const {
     const char* p = text;
     while (*p != '\0') {
         const uint32_t codepoint = Utf8Next(&p);
-        const ui_glyph_t* glyph = FindGlyph(font, codepoint);
-        width += glyph != nullptr ? static_cast<int>(glyph->width) + 1
-                                  : std::max(1, static_cast<int>(font.height / 2));
+        width += raw_font::Lookup(font, codepoint).advance;
     }
     return std::max(0, width - 1);
 }
@@ -1349,29 +1874,32 @@ void RawDisplay::FitText(const char* text, const ui_font_t& font, int max_width,
     const char* p = text;
     size_t written = 0;
     int width = 0;
+    bool truncated = false;
     while (*p != '\0') {
         const char* start = p;
         const uint32_t codepoint = Utf8Next(&p);
-        const ui_glyph_t* glyph = FindGlyph(font, codepoint);
-        const int advance = glyph != nullptr ? static_cast<int>(glyph->width) + 1
-                                             : std::max(1, static_cast<int>(font.height / 2));
-        if (width + advance > max_width) {
-            const char* ellipsis = "…";
-            const int ellipsis_width = TextWidth(ellipsis, font);
-            if (ellipsis_width > 0 && width + ellipsis_width <= max_width &&
-                written + std::strlen(ellipsis) + 1 < out_size) {
-                std::memcpy(out + written, ellipsis, std::strlen(ellipsis));
-                written += std::strlen(ellipsis);
-            }
+        const int advance = raw_font::Lookup(font, codepoint).advance;
+        const size_t bytes = static_cast<size_t>(p - start);
+        if (width + advance - 1 > max_width || written + bytes >= out_size) {
+            truncated = true;
             break;
         }
-        const size_t bytes = static_cast<size_t>(p - start);
-        if (written + bytes + 1 >= out_size) break;
         std::memcpy(out + written, start, bytes);
         written += bytes;
         width += advance;
     }
     out[written] = '\0';
+    if (!truncated) return;
+    constexpr const char* ellipsis = "…";
+    const size_t ellipsis_bytes = std::strlen(ellipsis);
+    const int ellipsis_width = TextWidth(ellipsis, font);
+    if (ellipsis_width > max_width || ellipsis_bytes >= out_size) return;
+    while (written > 0 && (TextWidth(out, font) + 1 + ellipsis_width > max_width ||
+                           written + ellipsis_bytes >= out_size)) {
+        do { --written; } while (written > 0 && (static_cast<uint8_t>(out[written]) & 0xC0) == 0x80);
+        out[written] = '\0';
+    }
+    std::memcpy(out + written, ellipsis, ellipsis_bytes + 1);
 }
 
 void RawDisplay::FitTextLines(const char* text, const ui_font_t& font, int max_width,
@@ -1397,10 +1925,7 @@ void RawDisplay::FitTextLines(const char* text, const ui_font_t& font, int max_w
     while (*cursor != '\0' && unit_count < sizeof(units) / sizeof(units[0])) {
         const char* start = cursor;
         const uint32_t codepoint = Utf8Next(&cursor);
-        const ui_glyph_t* unit_glyph = FindGlyph(font, codepoint);
-        const int advance = unit_glyph != nullptr
-                                ? static_cast<int>(unit_glyph->width) + 1
-                                : std::max(1, static_cast<int>(font.height / 2));
+        const int advance = raw_font::Lookup(font, codepoint).advance;
         units[unit_count++] = {start, static_cast<size_t>(cursor - start), advance, codepoint};
         total_width += advance;
     }
@@ -1695,8 +2220,11 @@ void RawDisplay::DrawTestConsoleLocked() {
         const int width = TextWidth(labels[i], ui_font_title);
         DrawText(kTestButtonX + (kTestButtonW - width) / 2, y + 34, labels[i], ui_font_title);
     }
-    DrawText(32, 756, "PAGE TURN 3L: masked white clear", ui_font_small);
-    DrawText(32, 780, "VERSION advances with TEST_VERSION_NEXT?", ui_font_small);
+    DrawText(32, 748, "PAGE TURN 3L: masked white clear", ui_font_small);
+    char test_hint[64];
+    FitText("NEXT / 切换测试版本", ui_font_small, kPortraitW - 64, test_hint,
+            sizeof(test_hint));
+    DrawText(32, 772, test_hint, ui_font_small);
 }
 
 void RawDisplay::ShowHomeScreen() {
@@ -1714,6 +2242,7 @@ void RawDisplay::ShowProductHomeScreen() {
     screen_test_mode_ = false;
     test_console_mode_ = false;
     product_page_ = ProductPage::Home;
+    navigation_index_ = 0;
     quick_note_state_ = 0;
     reader_page_ = 0;
     bool discharging = false;
@@ -1852,7 +2381,7 @@ void RawDisplay::DrawLegacyDashboardScreenLocked() {
     // short labels optically balanced.
     FillRect(kMargin, kHeroRuleY, kContentWidth, 1, true);
     DrawText(32, kScheduleHeaderY, "02", ui_font_small);
-    DrawText(70, kScheduleHeaderY - 2, "今日日程", ui_font_body);
+    DrawText(70, kScheduleHeaderY - 2, "近期日程", ui_font_body);
     const int calendar_x = 400;
     StrokeRoundRect(calendar_x, kScheduleHeaderY + 3, 25, 22, 4, 1);
     FillRect(calendar_x, kScheduleHeaderY + 10, 25, 2, true);
@@ -1940,393 +2469,584 @@ void RawDisplay::DrawLegacyDashboardScreenLocked() {
     FillRect(kMargin, kCustomRuleY, kContentWidth, 1, true);
 }
 
-void RawDisplay::DrawProductButtonLocked(int x, int y, int width, int height,
-                                         const char* label, bool filled) {
-    if (label == nullptr || label[0] == '\0' || width <= 0 || height <= 0) return;
-    if (filled) FillRect(x, y, width, height, true);
-    else StrokeRect(x, y, width, height, kUiCardStroke);
-
-    const ui_font_t& font = TextWidth(label, ui_font_body) <= width - 24
-                                ? ui_font_body
-                                : ui_font_status;
-    const int text_width = TextWidth(label, font);
-    const int draw_x = x + std::max(12, (width - text_width) / 2);
-    const int draw_y = y + std::max(0, (height - static_cast<int>(font.height)) / 2);
-    DrawTextInk(draw_x, draw_y, label, font, !filled);
+void RawDisplay::DrawProductLabelLocked(int x, int y, int width, const char* text,
+                                        const ui_font_t& font) {
+    char fitted[160];
+    FitText(text, font, width, fitted, sizeof(fitted));
+    DrawText(x, y, fitted, font);
 }
 
-void RawDisplay::DrawProductStatusBarLocked(const char* section) {
-    time_t now = time(nullptr);
-    struct tm tmv{};
-    localtime_r(&now, &tmv);
-
-    char clock_text[8];
-    std::snprintf(clock_text, sizeof(clock_text), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
-    DrawText(16, 5, clock_text, ui_font_status);
-
-    const char* weekdays[] = {"日", "一", "二", "三", "四", "五", "六"};
-    char date_text[24];
-    std::snprintf(date_text, sizeof(date_text), "%02d.%02d 周%s", tmv.tm_mon + 1,
-                  tmv.tm_mday, weekdays[std::clamp(tmv.tm_wday, 0, 6)]);
-    DrawText(112, 8, date_text, ui_font_small);
-
-    char network_text[32];
-    const dashboard::Snapshot snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
-    CopyDisplayText(network_text, sizeof(network_text),
-                    status_text_[0] != '\0' ? status_text_ : snapshot.network);
-    char network_fit[20];
-    FitText(network_text, ui_font_small, 96, network_fit, sizeof(network_fit));
-    DrawText(205, 8, network_fit, ui_font_small);
-
-    char section_fit[32];
-    FitText(section != nullptr ? section : "首页", ui_font_small, 92,
-            section_fit, sizeof(section_fit));
-    DrawTextCentered(304, 8, 96, 24, section_fit, ui_font_small);
-    DrawBattery(416, 9, battery_percent_, charging_);
-    FillRect(kUiInset, kUiStatusHeight - 1, kUiContentWidth, 1, true);
+void RawDisplay::DrawProductChevronLocked(int x, int y) {
+    DrawProductIconLocked(lucide::Id::ChevronRight, x - 6, y - 5, 24, true);
 }
 
-void RawDisplay::DrawProductFooterLocked(const char* first, const char* second,
-                                         const char* third, const char* fourth) {
-    const char* labels[4] = {first, second, third, fourth};
-    for (int i = 0; i < 4; ++i) {
-        const int row = i / 2;
-        const int column = i % 2;
-        DrawProductButtonLocked(kUiFooterX[column], kUiFooterRowY[row],
-                                kUiFooterButtonWidth, kUiFooterButtonHeight,
-                                labels[i]);
+void RawDisplay::DrawProductIconLocked(lucide::Id id, int x, int y, int size, bool black) {
+    const auto& icon=lucide::Get(id,size);
+    for (int row=0;row<icon.size;++row) for (int col=0;col<icon.size;++col) {
+        const int bit=row*icon.size+col;
+        if (icon.bits[bit/8] & (0x80>>(bit%8))) SetPixel(x+col,y+row,black);
     }
+}
+
+void RawDisplay::DrawProductIconRowLocked(int y, lucide::Id icon, const char* title,
+                                         const char* detail, bool selected) {
+    if (selected) FillRoundRect(32,y+8,40,40,12,true);
+    DrawProductIconLocked(icon,38,y+14,28,!selected);
+    DrawProductLabelLocked(88,y,328,title,ui_font_body);
+    DrawProductLabelLocked(88,y+34,328,detail,ui_font_small);
+    DrawProductChevronLocked(436,y+22);
+    FillRect(88,y+kUiRowHeight-1,360,1,true);
+}
+
+void RawDisplay::DrawProductHeadingLocked(const char* title, const char* index) {
+    DrawProductLabelLocked(kUiInset, kUiTitleY, kUiContentWidth - 112, title, ui_font_title);
+    DrawProductLabelLocked(kPortraitW - kUiInset - 96, kUiTitleY + 12, 96,
+                           index, ui_font_small);
+    FillRect(kUiInset, kUiBodyY - 16, kUiContentWidth, 1, true);
+}
+
+void RawDisplay::DrawProductClockLocked(int x, int y, const char* text) {
+    // Original 5x7 digits built from circles; no font download or runtime
+    // rasterizer. Deliberately static: seconds and blinking colons cost refreshes.
+    static constexpr uint8_t digits[10][7] = {
+        {14, 17, 19, 21, 25, 17, 14}, {4, 12, 4, 4, 4, 4, 14},
+        {14, 17, 1, 2, 4, 8, 31}, {30, 1, 1, 14, 1, 1, 30},
+        {2, 6, 10, 18, 31, 2, 2}, {31, 16, 16, 30, 1, 1, 30},
+        {14, 16, 16, 30, 17, 17, 14}, {31, 1, 2, 4, 8, 8, 8},
+        {14, 17, 17, 14, 17, 17, 14}, {14, 17, 17, 15, 1, 1, 14},
+    };
+    constexpr int pitch = 16;
+    for (const char* p = text; *p; ++p) {
+        if (*p == ':') {
+            FillCircle(x + 4, y + 2 * pitch + 4, 4, true);
+            FillCircle(x + 4, y + 4 * pitch + 4, 4, true);
+            x += 2 * pitch;
+        } else if (*p >= '0' && *p <= '9') {
+            for (int row = 0; row < 7; ++row) {
+                for (int col = 0; col < 5; ++col) {
+                    if (digits[*p - '0'][row] & (1 << (4 - col)))
+                        FillCircle(x + col * pitch + 4, y + row * pitch + 4, 4, true);
+                }
+            }
+            x += 6 * pitch;
+        }
+    }
+}
+
+void RawDisplay::DrawProductStatusBarLocked() {
+    const dashboard::Snapshot snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+    if (product_page_ == ProductPage::Home) {
+        DrawText(kUiInset, 16, "MIAO / INK", ui_font_small);
+    } else {
+        time_t now = time(nullptr);
+        struct tm tmv{};
+        localtime_r(&now, &tmv);
+        char clock_text[8];
+        std::snprintf(clock_text, sizeof(clock_text), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+        DrawText(kUiInset, 16, clock_text, ui_font_small);
+    }
+    // Separate bounded slots keep long connection labels away from the battery.
+    DrawProductLabelLocked(174, 16, 130, status_text_[0] ? status_text_ : snapshot.network, ui_font_small);
+    char percent[8];
+    std::snprintf(percent, sizeof(percent), "%d%%", std::clamp(battery_percent_, 0, 100));
+    DrawText(406 - TextWidth(percent, ui_font_small), 16, percent, ui_font_small);
+    const auto id=charging_ ? lucide::Id::BatteryCharging : battery_percent_>=75 ? lucide::Id::BatteryFull :
+        battery_percent_>=40 ? lucide::Id::BatteryMedium : battery_percent_>0 ? lucide::Id::BatteryLow : lucide::Id::Battery;
+    const auto glyph=raw_font::Lookup(ui_font_small,'8');
+    const auto& icon=lucide::Get(id,32);
+    const int center=16+glyph.y+glyph.height/2;
+    DrawProductIconLocked(id,416,center-(icon.top+icon.bottom+1)/2,32,true);
+}
+
+void RawDisplay::DrawProductControlRailLocked(const char* context) {
+    // One passive line. The capacitive cover keys and BOOT retain their routes;
+    // there are no on-screen footer buttons or invisible footer hit targets.
+    FillRect(kUiInset, kUiRailY, kUiContentWidth, 1, true);
+    const bool notice = notification_text_[0] != '\0' &&
+                        notification_deadline_ms_ > esp_timer_get_time() / 1000;
+    const char* hint = notice ? notification_text_ :
+                       (context ? context : "HOME 首页 / PREV 返回 / NEXT 下一项");
+    DrawProductLabelLocked(kUiInset, kUiRailY + 10, kUiContentWidth, hint, ui_font_small);
 }
 
 void RawDisplay::DrawProductHomeLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    const dashboard::Snapshot snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
     last_dashboard_revision_ = snapshot.revision;
-
     if (power_save_) {
-        const char* text = "休眠中";
-        DrawText((kPortraitW - TextWidth(text, ui_font_title)) / 2, 350, text, ui_font_title);
+        DrawTextCentered(kUiInset, 320, kUiContentWidth, 100, "休眠中", ui_font_title);
         return;
     }
-
-    const int64_t now_ms = esp_timer_get_time() / 1000;
-    const bool notification_active = notification_text_[0] != '\0' &&
-                                     notification_deadline_ms_ > now_ms;
-    DrawProductStatusBarLocked(notification_active ? notification_text_ : "首页");
-
-    char title[64];
-    FitText("今天，先做重要的事", ui_font_title, kUiContentWidth, title, sizeof(title));
-    DrawText(kUiInset, kUiTitleY + 2, title, ui_font_title);
-
-    // Main focus card.  A black field makes the first action visually
-    // dominant while retaining enough white margin for the paper-like grid.
-    FillRect(kUiInset, kUiBodyY, kUiContentWidth, 248, true);
-    DrawTextInk(kUiInset + 24, kUiBodyY + 20, "AI 今日重点", ui_font_status, false);
-    FillRect(kUiInset + 24, kUiBodyY + 58, kUiContentWidth - 48, 1, false);
-    const char* focus_source = snapshot.ai_count > 0 && snapshot.ai_summary[0][0] != '\0'
-                                   ? snapshot.ai_summary[0]
-                                   : "暂无重点，点击开始询问小智";
-    char focus_line1[96];
-    char focus_line2[96];
-    FitTextLines(focus_source, ui_font_body, kUiContentWidth - 48,
-                 focus_line1, sizeof(focus_line1), focus_line2, sizeof(focus_line2));
-    auto draw_center_ink = [this](int x, int y, int width, const char* text,
-                                  const ui_font_t& font) {
-        if (text == nullptr || text[0] == '\0') return;
-        const int text_width = TextWidth(text, font);
-        DrawTextInk(x + std::max(0, (width - text_width) / 2), y, text, font, false);
-    };
-    draw_center_ink(kUiInset + 24, kUiBodyY + 84, kUiContentWidth - 48,
-                    focus_line1, ui_font_body);
-    if (focus_line2[0] != '\0') {
-        draw_center_ink(kUiInset + 24, kUiBodyY + 126, kUiContentWidth - 48,
-                        focus_line2, ui_font_body);
+    DrawProductStatusBarLocked();
+    time_t now = time(nullptr);
+    struct tm tmv{};
+    localtime_r(&now, &tmv);
+    const bool clock_valid = reminders::ValidClock(now);
+    char clock_text[8];
+    std::snprintf(clock_text, sizeof(clock_text), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    if (clock_valid) DrawProductClockLocked(40, 88, clock_text);
+    else DrawTextCentered(32, 88, 416, 112, "等待校时", ui_font_title);
+    static constexpr const char* weekdays[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    char date_text[48];
+    std::snprintf(date_text, sizeof(date_text), "%d 月 %d 日  %s", tmv.tm_mon + 1,
+                  tmv.tm_mday, weekdays[std::clamp(tmv.tm_wday, 0, 6)]);
+    DrawTextCentered(32, 216, 416, 40, clock_valid ? date_text : "联网后自动同步", ui_font_small);
+    std::string next_alarm = "未设置", event_count = "暂无日程";
+    int64_t earliest = 0;
+    int events = 0;
+    for (const auto& item : reminders::Service::Instance().List()) {
+        const auto next = reminders::UpcomingOccurrence(item, now - 1);
+        if (item.kind == "alarm" && next > 0 && (!earliest || next < earliest)) earliest = next;
+        if (item.kind == "event" && next > 0) ++events;
     }
-    char focus_status[48];
-    CopyDisplayText(focus_status, sizeof(focus_status), snapshot.ai_status);
-    char focus_status_fit[48];
-    FitText(focus_status, ui_font_small, kUiContentWidth - 48,
-            focus_status_fit, sizeof(focus_status_fit));
-    DrawTextInk(kUiInset + 24, kUiBodyY + 203, focus_status_fit, ui_font_small, false);
-
-    // The following two cards are intentionally equal in height.  They are
-    // separate targets so a tap never depends on the text length in the card.
-    StrokeRect(kUiInset, 384, kUiContentWidth, 112, kUiCardStroke);
-    DrawText(kUiInset + 16, 397, "下一件", ui_font_small);
-    if (snapshot.schedule_count > 0) {
-        DrawText(kUiInset + 16, 425, snapshot.schedule[0].time, ui_font_status);
-        char next_title[56];
-        FitText(snapshot.schedule[0].title, ui_font_body, 278, next_title, sizeof(next_title));
-        DrawText(kUiInset + 118, 421, next_title, ui_font_body);
-        char next_detail[72];
-        FitText(snapshot.schedule[0].detail, ui_font_small, 300,
-                next_detail, sizeof(next_detail));
-        DrawText(kUiInset + 118, 462, next_detail, ui_font_small);
-    } else {
-        DrawText(kUiInset + 16, 430, "暂无安排", ui_font_body);
+    if (earliest) next_alarm = reminders::LocalTime(earliest).substr(11, 5);
+    if (events) event_count = std::to_string(events) + " 项安排";
+    const auto recorder = xiaozhi::AudioSession::GetInstance().RecorderState();
+    const char* names[] = {"闹钟", "日历", "录音", "小智"};
+    const char* details[] = {next_alarm.c_str(), event_count.c_str(), recorder.has_clip ? "最近一段" : "随时记录",
+        std::strcmp(snapshot.ai_status,"请绑定设备")==0 ? "请绑定设备" : "按住 AI 键说话"};
+    for (int i = 0; i < 4; ++i) {
+        const int x = kUiHomeX[i % 2], y = kUiHomeY[i / 2];
+        StrokeRoundRect(x, y, kUiHomeW, kUiHomeH, 16, navigation_index_ == i ? 3 : 1);
+        DrawProductAppIconLocked(i, x + 20, y + 16);
+        DrawProductLabelLocked(x + 20, y + 64, kUiHomeW - 40, names[i], ui_font_body);
+        DrawProductLabelLocked(x + 20, y + 108, kUiHomeW - 40, details[i], ui_font_small);
     }
+    const char* nav[] = {"应用目录", "设备选项"};
+    for (int i = 0; i < 2; ++i) {
+        const int x = kUiHomeX[i];
+        StrokeRoundRect(x, kUiHomeNavY, kUiHomeW, kUiHomeNavH, 16, navigation_index_ == i + 4 ? 3 : 1);
+        DrawProductIconLocked(i ? lucide::Id::Settings2 : lucide::Id::LayoutGrid,x+16,kUiHomeNavY+20,24,true);
+        DrawTextCentered(x+48, kUiHomeNavY, kUiHomeW-56, kUiHomeNavH, nav[i], ui_font_status);
+    }
+    const bool notice = notification_text_[0] && notification_deadline_ms_ > esp_timer_get_time()/1000;
+    if (notice) DrawProductControlRailLocked("");
+}
 
-    StrokeRect(kUiInset, 512, kUiContentWidth, 112, kUiCardStroke);
-    DrawText(kUiInset + 16, 525, "继续阅读", ui_font_small);
-    const dashboard::CustomCard& reading = snapshot.custom[1];
-    char reading_title_source[40];
-    CopyDisplayText(reading_title_source, sizeof(reading_title_source),
-                    reading.enabled && reading.title[0] != '\0' ? reading.title : "打开书库");
-    char reading_title[40];
-    FitText(reading_title_source, ui_font_body, 260, reading_title, sizeof(reading_title));
-    DrawText(kUiInset + 16, 552, reading_title, ui_font_body);
-    char reading_value[40];
-    CopyDisplayText(reading_value, sizeof(reading_value),
-                    reading.enabled && reading.value[0] != '\0' ? reading.value : "暂无阅读记录");
-    FitText(reading_value, ui_font_small, 260, reading_value, sizeof(reading_value));
-    DrawText(kUiInset + 16, 590, reading_value, ui_font_small);
-    DrawText(kUiInset + 336, 560, ">", ui_font_title);
+void RawDisplay::DrawProductAppIconLocked(int icon, int x, int y) {
+    static constexpr lucide::Id ids[]={lucide::Id::AlarmClock,lucide::Id::CalendarDays,lucide::Id::Mic,lucide::Id::Bot};
+    DrawProductIconLocked(ids[std::clamp(icon,0,3)],x,y,40,true);
+}
 
-    DrawProductFooterLocked("随手记", "留屏", "应用", "问 AI");
+void RawDisplay::DrawProductAlarmLocked() {
+    std::memset(portrait_fb_, kWhite, portrait_size_);
+    DrawProductStatusBarLocked();
+    auto items = reminders::Service::Instance().List();
+    items.erase(std::remove_if(items.begin(), items.end(), [](const auto& item) {
+        return item.kind != "alarm";
+    }), items.end());
+    const auto now = time(nullptr);
+    std::stable_sort(items.begin(), items.end(), [now](const auto& a, const auto& b) {
+        const auto at = reminders::UpcomingOccurrence(a, now - 1), bt = reminders::UpcomingOccurrence(b, now - 1);
+        return (at ? at : INT64_MAX) < (bt ? bt : INT64_MAX);
+    });
+    alarm_pages_ = std::max(1, (static_cast<int>(items.size()) + 3) / 4);
+    alarm_page_ = std::clamp(alarm_page_, 0, alarm_pages_ - 1);
+    char label[64];
+    std::snprintf(label, sizeof(label), "%d 项", static_cast<int>(items.size()));
+    DrawProductHeadingLocked("闹钟", label);
+    std::fill(std::begin(alarm_ids_), std::end(alarm_ids_), 0);
+    for (int row = 0; row < 4; ++row) {
+        const int index = alarm_page_ * 4 + row;
+        if (index >= static_cast<int>(items.size())) break;
+        const auto& item = items[index];
+        alarm_ids_[row] = item.id;
+        alarm_enabled_[row] = item.enabled || item.snoozed_until;
+        const int y = 144 + row * 112;
+        const auto local = reminders::LocalTime(item.snoozed_until ? item.snoozed_until : item.at);
+        DrawText(32, y, local.substr(11, 5).c_str(), ui_font_title);
+        DrawProductLabelLocked(168, y + 10, 164, item.title.c_str(), ui_font_status);
+        std::string repeat = item.snoozed_until ? "稍后提醒" : item.weekdays == 127 ? "每天" :
+            item.weekdays == 31 ? "工作日" : item.weekdays == 96 ? "周末" :
+            item.weekdays ? "每周重复" : local.substr(5,5) + " 仅一次";
+        DrawProductLabelLocked(32, y + 60, 280, repeat.c_str(), ui_font_small);
+        const bool enabled = alarm_enabled_[row];
+        if (enabled) FillRoundRect(344, y + 16, 104, 48, 24, true);
+        else StrokeRoundRect(344, y + 16, 104, 48, 24, 1);
+        const char* state = enabled ? "已开启" : "已关闭";
+        DrawTextInk(344 + (104 - TextWidth(state, ui_font_small))/2, y + 28, state, ui_font_small, !enabled);
+        FillRect(32, y + 103, 416, 1, true);
+    }
+    if (items.empty()) {
+        DrawProductAppIconLocked(0, 220, 212);
+        DrawTextCentered(32, 292, 416, 48, "还没有闹钟", ui_font_body);
+        DrawTextCentered(32, 356, 416, 40, "试着说：明早七点叫我", ui_font_small);
+    }
+    StrokeRoundRect(32, 600, 416, 48, 12, 1);
+    DrawTextCentered(32, 600, 416, 48, "语音添加闹钟", ui_font_small);
+    if (alarm_pages_ > 1) {
+        for (int i = 0; i < 2; ++i) {
+            StrokeRoundRect(kUiHomeX[i], 672, 200, 48, 12, 1);
+            DrawTextCentered(kUiHomeX[i], 672, 200, 48, i ? "下一页" : "上一页", ui_font_small);
+        }
+    }
+    std::snprintf(label, sizeof(label), "轻铃 / 第 %d 页，共 %d 页", alarm_page_ + 1, alarm_pages_);
+    DrawProductControlRailLocked(label);
+}
+
+void RawDisplay::DrawProductRecorderLocked() {
+    std::memset(portrait_fb_, kWhite, portrait_size_);
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("录音", "本地");
+    const auto state = xiaozhi::AudioSession::GetInstance().RecorderState();
+    const bool active = state.mode != audio::RecorderMode::Idle;
+    DrawProductAppIconLocked(2, 220, 184);
+    const char* status = state.mode == audio::RecorderMode::Recording ? "正在录音" :
+                         state.mode == audio::RecorderMode::Playing ? "正在回放" :
+                         state.mode == audio::RecorderMode::Loading ? "正在读取录音" :
+                         state.failed ? "录音未完成" : state.has_clip ? "最近一段录音" : "记下此刻的声音";
+    DrawTextCentered(32, 264, 416, 48, status, ui_font_body);
+    char duration[32];
+    std::snprintf(duration,sizeof(duration),"00:%02u",static_cast<unsigned>(state.seconds));
+    DrawTextCentered(32, 336, 416, 56,
+                     active ? "最长 30 秒" : state.has_clip ? duration : "最长 30 秒", ui_font_title);
+    DrawTextCentered(32, 412, 416, 32, "本地回放 / 语音文字笔记", ui_font_small);
+    FillRoundRect(32, 496, 416, 64, 16, true);
+    const char* action = active ? "停止" : state.has_clip ? "重新录音" : "开始录音";
+    DrawTextInk((480-TextWidth(action,ui_font_body))/2,512,action,ui_font_body,false);
+    if (state.has_clip && !active) {
+        StrokeRoundRect(32, 584, 416, 64, 16, 1);
+        DrawTextCentered(32, 584, 416, 64, "回放录音", ui_font_body);
+    }
+    if (!active) {
+        StrokeRoundRect(32, 672, 416, 64, 16, 1);
+        DrawTextCentered(32, 672, 416, 64, "新建语音文字笔记", ui_font_status);
+    }
+    DrawProductControlRailLocked(active ? "点停止结束 / 返回时停止" :
+                                 state.saved ? "最近录音已保存到 SD 卡" : "无 SD 存档 / 仅本次开机保留");
 }
 
 void RawDisplay::DrawProductAppsLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("应用");
-    DrawText(kUiInset, kUiTitleY + 2, "应用目录", ui_font_title);
-
-    static constexpr const char* kNames[] = {"阅读", "AI 助手", "随手记", "卡片盒", "设置", "更多"};
-    static constexpr const char* kDetails[] = {
-        "从 SD 卡继续阅读", "提问、总结与整理", "录音并保存原文", "浏览已保存内容",
-        "布局、网络与省电", "工作台和设备工具",
-    };
-    for (int i = 0; i < 6; ++i) {
-        const int y = kUiBodyY + i * (kUiListRowHeight + kUiListRowGap);
-        StrokeRect(kUiInset, y, kUiContentWidth, kUiListRowHeight, kUiCardStroke);
-        char index[8];
-        std::snprintf(index, sizeof(index), "%02d", i + 1);
-        DrawText(kUiInset + 16, y + 20, index, ui_font_small);
-        DrawText(kUiInset + 66, y + 12, kNames[i], ui_font_body);
-        DrawText(kUiInset + 66, y + 43, kDetails[i], ui_font_small);
-        DrawText(kUiInset + kUiContentWidth - 36, y + 14, ">", ui_font_title);
-    }
-    DrawProductFooterLocked("返回", "卡片盒", "设置", "更多");
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("应用目录", "7 项");
+    static constexpr const char* names[] = {"闹钟", "日历", "录音", "小智", "AI 笔记", "我的胶囊", "阅读"};
+    static constexpr const char* details[] = {"定时与重复提醒", "日期与日程", "离线录音、回放", "对话与语音助手", "备忘、清单与学习摘记", "保存的原文与回答", "继续阅读"};
+    static constexpr lucide::Id icons[]={lucide::Id::AlarmClock,lucide::Id::CalendarDays,lucide::Id::Mic,
+        lucide::Id::Bot,lucide::Id::NotebookPen,lucide::Id::StickyNote,lucide::Id::BookOpen};
+    for (int i=0;i<7;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],names[i],details[i],navigation_index_==i);
+    DrawProductControlRailLocked("返回首页 / 点击打开应用");
 }
 
 void RawDisplay::DrawProductAiLocked(bool details) {
+    (void)details;
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked(details ? "AI 详情" : "AI 结果");
-    DrawText(kUiInset, kUiTitleY + 2, details ? "下一步" : "AI 结果", ui_font_title);
-
-    const dashboard::Snapshot snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
-    if (!details) {
-        StrokeRect(kUiInset, kUiBodyY, kUiContentWidth, 248, kUiCardStroke);
-        DrawText(kUiInset + 20, kUiBodyY + 18, "摘要", ui_font_small);
-        const char* summary = snapshot.ai_count > 0 && snapshot.ai_summary[0][0] != '\0'
-                                  ? snapshot.ai_summary[0]
-                                  : "等待小智返回结果";
-        char line1[96];
-        char line2[96];
-        FitTextLines(summary, ui_font_body, kUiContentWidth - 40,
-                     line1, sizeof(line1), line2, sizeof(line2));
-        DrawText(kUiInset + 20, kUiBodyY + 62, line1, ui_font_body);
-        DrawText(kUiInset + 20, kUiBodyY + 104, line2, ui_font_body);
-        DrawText(kUiInset + 20, kUiBodyY + 176, "结论", ui_font_small);
-        const char* conclusion = snapshot.ai_count > 1 ? snapshot.ai_summary[1] : "点击下一步查看执行建议";
-        char conclusion_fit[96];
-        FitText(conclusion, ui_font_status, kUiContentWidth - 40,
-                conclusion_fit, sizeof(conclusion_fit));
-        DrawText(kUiInset + 20, kUiBodyY + 205, conclusion_fit, ui_font_status);
-        DrawProductFooterLocked("存卡片", "留屏", "下一步", "返回");
-    } else {
-        static constexpr const char* kSteps[] = {
-            "1 先完成当前最重要的一件事",
-            "2 把结果写入卡片盒",
-            "3 再安排下一次提醒",
-        };
-        for (int i = 0; i < 3; ++i) {
-            const int y = kUiBodyY + i * 86;
-            StrokeRect(kUiInset, y, kUiContentWidth, 72, kUiCardStroke);
-            DrawText(kUiInset + 20, y + 20, kSteps[i], ui_font_body);
-        }
-        DrawText(kUiInset + 16, 390, "流式结果按完整段落更新屏幕", ui_font_small);
-        DrawProductFooterLocked("返回结果", "存卡片", "留屏", "首页");
+    DrawProductStatusBarLocked();
+    DrawText(kUiInset, 72, voice_note_mode_ ? "语音笔记" : "小智助手", ui_font_title);
+    const auto dashboard = dashboard::DashboardData::GetInstance().GetSnapshot();
+    if (std::strcmp(dashboard.ai_status,"请绑定设备")==0) {
+        DrawText(32,168,"连接小智",ui_font_body);
+        DrawProductLabelLocked(32,256,416,dashboard.ai_summary[0],ui_font_title);
+        DrawText(32,344,"在 xiaozhi.me 输入绑定码",ui_font_status);
+        DrawText(32,400,"绑定后即可使用语音和文字笔记",ui_font_small);
+        DrawProductControlRailLocked("HOME 首页 / 等待绑定完成");
+        return;
     }
+    StrokeRoundRect(344, 72, 104, 48, 24, 1);
+    DrawTextCentered(344, 72, 104, 48, "停止", ui_font_small);
+    const auto snapshot = xiaozhi::Conversation::GetInstance().Snapshot();
+    if (ai_drawn_turn_ != snapshot.turn) {
+        ai_drawn_turn_ = snapshot.turn;
+        ai_text_page_ = 0;
+        ai_show_transcript_ = voice_note_mode_;
+    }
+    const char* states[] = {"按住说话 · 松开发送", "正在开启麦克风", "正在聆听 · 松手结束",
+                            "正在识别", "AI 正在思考", "AI 正在回答", "已完成", "暂时无法完成"};
+    const bool listening = snapshot.state == xiaozhi::TurnState::Listening;
+    const bool busy = snapshot.state == xiaozhi::TurnState::Connecting || listening ||
+                      snapshot.state == xiaozhi::TurnState::Transcribing ||
+                      snapshot.state == xiaozhi::TurnState::Thinking || snapshot.state == xiaozhi::TurnState::Speaking;
+    if (listening) FillCircle(40, 157, 6, true);
+    else StrokeCircle(40, 157, 6, 1);
+    DrawProductLabelLocked(60, 140, 388, states[static_cast<unsigned>(snapshot.state)], ui_font_status);
+    const char* message = snapshot.message.empty() ? "按住机身 AI 键，说出此刻的想法。" : snapshot.message.c_str();
+    char hint1[160], hint2[160];
+    FitTextLines(message, ui_font_small, kUiContentWidth,
+                 hint1, sizeof(hint1), hint2, sizeof(hint2));
+    DrawText(kUiInset, 188, hint1, ui_font_small);
+    DrawText(kUiInset, 216, hint2, ui_font_small);
+
+    FillRect(kUiInset, 272, kUiContentWidth, 1, true);
+    DrawText(kUiInset, 296, ai_show_transcript_ ? "原文 / 切换" : "AI 回答 / 切换", ui_font_small);
+    const std::string& body = ai_show_transcript_ ? snapshot.transcript : snapshot.answer;
+    auto lines = raw_font::Wrap(body, kUiContentWidth, [](uint32_t cp) {
+        return raw_font::Lookup(ui_font_body, cp).advance;
+    });
+    ai_page_count_ = std::max(1, (static_cast<int>(lines.size()) + kAiLinesPerPage - 1) / kAiLinesPerPage);
+    ai_text_page_ = std::clamp(ai_text_page_, 0, ai_page_count_ - 1);
+    char progress[24];
+    std::snprintf(progress, sizeof(progress), "%02d / %02d", ai_text_page_ + 1, ai_page_count_);
+    DrawText(448 - TextWidth(progress, ui_font_small), 296, progress, ui_font_small);
+    if (body.empty()) {
+        if (!snapshot.transcript.empty() && !ai_show_transcript_) {
+            DrawText(kUiInset, 352, "你刚刚说", ui_font_small);
+            char line1[192], line2[192];
+            FitTextLines(snapshot.transcript.c_str(), ui_font_body, kUiContentWidth,
+                         line1, sizeof(line1), line2, sizeof(line2));
+            DrawText(kUiInset, 392, line1, ui_font_body);
+            DrawText(kUiInset, 430, line2, ui_font_body);
+        } else {
+            DrawText(kUiInset, 376, listening ? "正在听你说…" : "让想法，随时留下。", ui_font_body);
+            DrawText(kUiInset, 436, "识别原文自动保存为最近一条胶囊", ui_font_small);
+            DrawText(kUiInset, 468, "可整理灵感、提炼待办或翻译", ui_font_small);
+        }
+    } else {
+        for (int i = 0; i < kAiLinesPerPage; ++i) {
+            const int line = ai_text_page_ * kAiLinesPerPage + i;
+            if (line >= static_cast<int>(lines.size())) break;
+            DrawText(kUiInset, 340 + i * 36, lines[line].c_str(), ui_font_body);
+        }
+    }
+    if (snapshot.truncated) DrawText(kUiInset, 586, "内容较长，已保留前段", ui_font_small);
+    const char* save_label = snapshot.saved ? "已保存" : snapshot.saving_revision ? "保存中" :
+                             snapshot.save_failed ? "保存失败 · 重试" : "保存胶囊";
+    const char* labels[] = {busy ? "整理 · 请稍候" : "整理灵感",
+                            busy ? "待办 · 请稍候" : "提炼待办",
+                            busy ? "翻译 · 请稍候" : "翻译英文", save_label};
+    for (int i = 0; i < 4; ++i) {
+        const int x = kAiActionX[i % 2], y = kAiActionY[i / 2];
+        StrokeRoundRect(x, y, kAiActionW, kAiActionH, 24, 1);
+        DrawTextCentered(x, y, kAiActionW, kAiActionH, labels[i], ui_font_status);
+    }
+    DrawProductControlRailLocked(busy ? "AI 键松手结束 / HOME 首页" : "HOME 首页 / PREV 上页 / NEXT 下页");
 }
 
 void RawDisplay::DrawProductQuickNoteLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("随手记");
-    DrawText(kUiInset, kUiTitleY + 2, "随手记", ui_font_title);
-    StrokeRect(kUiInset, kUiBodyY, kUiContentWidth, 300, kUiCardStroke);
-    static constexpr const char* kStateNames[] = {"待开始", "录音中", "原文已保存", "AI 整理完成", "草稿待确认"};
-    static constexpr const char* kStateDetails[] = {
-        "按左下按钮开始录音", "再次点击结束录音并保存原文", "保存成功，等待 AI 整理",
-        "请检查标题和内容", "确认后才会创建任务",
-    };
-    const uint8_t state = std::min<uint8_t>(quick_note_state_, 4);
-    DrawText(kUiInset + 24, kUiBodyY + 28, kStateNames[state], ui_font_body);
-    DrawText(kUiInset + 24, kUiBodyY + 84, kStateDetails[state], ui_font_status);
-    DrawText(kUiInset + 24, kUiBodyY + 152, "今天的想法会先保存为原文", ui_font_small);
-    if (state >= 3) {
-        DrawText(kUiInset + 24, kUiBodyY + 198, "标题：整理今天的工作重点", ui_font_status);
-        DrawText(kUiInset + 24, kUiBodyY + 238, "内容：完成后再交给小智安排下一步", ui_font_small);
-    }
-    DrawProductFooterLocked("开始录音", "AI 整理", "确认任务", "返回");
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("我的胶囊", "NOTE");
+    DrawText(kUiInset, 192, "按住 AI 键，说出你的想法。", ui_font_body);
+    DrawText(kUiInset, 244, "松手后识别原文，自动保存到本机。", ui_font_small);
+    DrawText(kUiInset, 284, "这里保留最近一次成功保存的胶囊。", ui_font_small);
+    DrawText(kUiInset, 360, "灵感 / 待办 / 翻译", ui_font_status);
+    StrokeRoundRect(kUiInset, 504, kUiContentWidth, 64, 24, 1);
+    DrawTextCentered(kUiInset, 504, kUiContentWidth, 64, "打开最近胶囊", ui_font_body);
+    DrawProductControlRailLocked(nullptr);
 }
 
 void RawDisplay::DrawProductReaderLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("阅读");
-    char page_text[24];
-    std::snprintf(page_text, sizeof(page_text), "阅读  %u / 3",
-                  static_cast<unsigned>(reader_page_ + 1));
-    DrawText(kUiInset, kUiTitleY + 2, page_text, ui_font_title);
-    StrokeRect(kUiInset, kUiBodyY, kUiContentWidth, kUiBodyHeight, kUiCardStroke);
-
-    static constexpr const char* kLines[3][10] = {
+    DrawProductStatusBarLocked();
+    const uint8_t page = std::min<uint8_t>(reader_page_, 2);
+    char progress[16];
+    std::snprintf(progress, sizeof(progress), "%02u / 03", static_cast<unsigned>(page + 1));
+    DrawProductHeadingLocked("阅读", progress);
+    static constexpr const char* lines[3][10] = {
         {"第一章  从一件小事开始", "", "今天只做一件重要的事。", "把目标写下来，再把它拆成", "可以马上完成的小步。", "", "完成一小步以后，停下来", "看看下一步是否仍然清楚。", "", ""},
         {"第二章  保持连续", "", "稳定的节奏比偶尔的冲刺", "更容易留下真正的进展。", "把注意力放回当前一页，", "让工具安静地服务于阅读。", "", "", "", ""},
         {"第三章  记录结果", "", "在一天结束以前记下结果，", "明天就不必从头寻找方向。", "一张卡片足够承接一个想法。", "", "", "", "", ""},
     };
-    const uint8_t page = std::min<uint8_t>(reader_page_, 2);
     for (int i = 0; i < 10; ++i) {
-        if (kLines[page][i][0] == '\0') continue;
-        DrawText(kUiInset + 24, kUiBodyY + 22 + i * 42, kLines[page][i],
-                 i == 0 ? ui_font_status : ui_font_body);
+        DrawProductLabelLocked(kUiInset, 172 + i * 44, kUiContentWidth,
+                               lines[page][i], i == 0 ? ui_font_status : ui_font_body);
     }
-    DrawProductFooterLocked("上一页", "下一页", "目录", "返回");
+    for (int i = 0; i < 3; ++i) {
+        if (i == page) FillCircle(220 + i * 20, 704, 4, true);
+        else StrokeCircle(220 + i * 20, 704, 4, 1);
+    }
+    DrawProductControlRailLocked("HOME 首页 / PREV 上一页 / NEXT 下一页");
 }
 
 void RawDisplay::DrawProductTodayListLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("今日清单");
-    DrawText(kUiInset, kUiTitleY + 2, "今日清单", ui_font_title);
-    const dashboard::Snapshot snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
-    const int count = std::min<int>(snapshot.schedule_count, 3);
-    for (int i = 0; i < count; ++i) {
-        const int y = kUiBodyY + i * 76;
-        StrokeRect(kUiInset, y, kUiContentWidth, 64, kUiCardStroke);
-        DrawText(kUiInset + 18, y + 17, snapshot.schedule[i].time, ui_font_status);
-        char title[56];
-        FitText(snapshot.schedule[i].title, ui_font_body, 270, title, sizeof(title));
-        DrawText(kUiInset + 112, y + 12, title, ui_font_body);
-        DrawText(kUiInset + 112, y + 42, snapshot.schedule[i].done ? "已完成" : "待处理",
-                 ui_font_small);
-        if (snapshot.schedule[i].done) FillCircle(kUiInset + 414, y + 31, 7, true);
-        else StrokeCircle(kUiInset + 414, y + 31, 7, 2);
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("日历", "日程");
+    const time_t now = time(nullptr);
+    if (!reminders::ValidClock(now)) {
+        DrawText(32, 200, "联网校时后显示日历", ui_font_body);
+        DrawProductControlRailLocked("HOME 首页");
+        return;
     }
-    if (count == 0) DrawText(kUiInset + 24, kUiBodyY + 24, "今天还没有安排", ui_font_body);
-    DrawProductFooterLocked("返回", "完成", "卡片盒", "首页");
+    struct tm today{}; localtime_r(&now, &today);
+    struct tm month = today;
+    month.tm_mday = 1; month.tm_mon += calendar_month_;
+    month.tm_hour = month.tm_min = month.tm_sec = 0;
+    const time_t first = mktime(&month);
+    struct tm following = month; ++following.tm_mon;
+    const int days = static_cast<int>((mktime(&following) - first) / 86400);
+    calendar_day_ = std::clamp(calendar_day_ ? calendar_day_ : today.tm_mday, 1, days);
+    char label[48];
+    std::snprintf(label, sizeof(label), "%d 年 %02d 月", month.tm_year + 1900, month.tm_mon + 1);
+    DrawTextCentered(104, 136, 272, 48, label, ui_font_status);
+    for (int i = 0; i < 2; ++i) {
+        StrokeRoundRect(i ? 384 : 32, 136, 64, 48, 12, 1);
+        DrawTextCentered(i ? 384 : 32, 136, 64, 48, i ? ">" : "<", ui_font_body);
+    }
+    const char* weekdays[] = {"一", "二", "三", "四", "五", "六", "日"};
+    for (int i = 0; i < 7; ++i) DrawTextCentered(44 + i * 56, 192, 56, 32, weekdays[i], ui_font_small);
+    const int lead = (month.tm_wday + 6) % 7;
+    const auto items = reminders::Service::Instance().List();
+    for (int day = 1; day <= days; ++day) {
+        const int cell = lead + day - 1;
+        const int x = 44 + cell % 7 * 56, y = 232 + cell / 7 * 44;
+        const bool selected = day == calendar_day_;
+        if (selected) FillRoundRect(x + 4, y, 48, 40, 12, true);
+        else if (calendar_month_ == 0 && day == today.tm_mday) StrokeRoundRect(x + 4, y, 48, 40, 12, 1);
+        char number[16]; std::snprintf(number, sizeof(number), "%d", day);
+        DrawTextInk(x + (56 - TextWidth(number, ui_font_small))/2, y + 5, number, ui_font_small, !selected);
+        for (const auto& item : items) {
+            if (item.kind != "event") continue;
+            const int64_t begin = first + (day - 1) * 86400;
+            const auto occurrence = reminders::OccurrenceOnDay(item, begin);
+            if (occurrence >= begin && occurrence < begin + 86400) {
+                FillCircle(x + 28, y + 35, 2, !selected);
+                break;
+            }
+        }
+    }
+    FillRect(32, 508, 416, 1, true);
+    std::snprintf(label, sizeof(label), "%d 月 %d 日", month.tm_mon + 1, calendar_day_);
+    DrawText(32, 516, label, ui_font_small);
+    std::vector<std::pair<int64_t, reminders::Item>> events;
+    const auto begin = first + (calendar_day_ - 1) * 86400;
+    for (const auto& item : items) {
+        if (item.kind != "event") continue;
+        const auto next = reminders::OccurrenceOnDay(item, begin);
+        if (next >= begin && next < begin + 86400) events.emplace_back(next, item);
+    }
+    std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    const int pages = std::max(1, (static_cast<int>(events.size()) + 1)/2);
+    calendar_events_page_ %= pages;
+    for (int row = 0; row < 2; ++row) {
+        const int index = calendar_events_page_ * 2 + row;
+        if (index >= static_cast<int>(events.size())) break;
+        const auto& event = events[index];
+        const int y = 556 + row * 60;
+        DrawText(32, y + 4, reminders::LocalTime(event.first).substr(11,5).c_str(), ui_font_small);
+        DrawProductLabelLocked(128, y, 320, event.second.title.c_str(), ui_font_body);
+    }
+    if (events.empty()) DrawText(32, 564, "这一天没有日程", ui_font_body);
+    StrokeRoundRect(32, 688, 200, 48, 12, 1);
+    DrawTextCentered(32, 688, 200, 48, "语音添加", ui_font_small);
+    if (pages > 1) {
+        std::snprintf(label, sizeof(label), "更多 %d/%d", calendar_events_page_ + 1, pages);
+        StrokeRoundRect(248, 688, 200, 48, 12, 1);
+        DrawTextCentered(248, 688, 200, 48, label, ui_font_small);
+    }
+    DrawProductControlRailLocked("点日期查看 / PREV、NEXT 翻月");
 }
 
 void RawDisplay::DrawProductCardBoxLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("卡片盒");
-    DrawText(kUiInset, kUiTitleY + 2, "卡片盒", ui_font_title);
-    const dashboard::Snapshot snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("卡片盒", "CARDS");
+    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
     int row = 0;
-    for (size_t i = 0; i < dashboard::kCustomCardCount && row < 3; ++i) {
-        if (!snapshot.custom[i].enabled) continue;
-        const int y = kUiBodyY + row * 88;
-        StrokeRect(kUiInset, y, kUiContentWidth, 76, kUiCardStroke);
-        DrawText(kUiInset + 18, y + 10, snapshot.custom[i].title, ui_font_body);
-        DrawText(kUiInset + 18, y + 46, snapshot.custom[i].value, ui_font_small);
-        DrawText(kUiInset + 408, y + 16, ">", ui_font_title);
+    auto draw_card = [&](const char* title, const char* detail) {
+        const int y = kUiBodyY + row * kUiCardPitch;
+        StrokeRoundRect(kUiInset, y, kUiContentWidth, kUiCardHeight, 16, 1);
+        DrawProductLabelLocked(kUiInset + 20, y + 6, kUiContentWidth - 64, title, ui_font_body);
+        DrawProductLabelLocked(kUiInset + 20, y + 46, kUiContentWidth - 64, detail, ui_font_small);
+        DrawProductChevronLocked(kPortraitW - kUiInset - 28, y + 32);
         ++row;
+    };
+    for (size_t i = 0; i < dashboard::kCustomCardCount && row < 3; ++i) {
+        if (snapshot.custom[i].enabled) draw_card(snapshot.custom[i].title, snapshot.custom[i].value);
     }
     for (size_t i = 0; i < dashboard::kAiSummaryCount && row < 3; ++i) {
-        if (snapshot.ai_summary[i][0] == '\0') continue;
-        const int y = kUiBodyY + row * 88;
-        StrokeRect(kUiInset, y, kUiContentWidth, 76, kUiCardStroke);
-        DrawText(kUiInset + 18, y + 10, "AI 摘要", ui_font_small);
-        char summary[80];
-        FitText(snapshot.ai_summary[i], ui_font_status, 350, summary, sizeof(summary));
-        DrawText(kUiInset + 18, y + 38, summary, ui_font_status);
-        ++row;
+        if (snapshot.ai_summary[i][0]) draw_card("AI 摘要", snapshot.ai_summary[i]);
     }
-    if (row == 0) DrawText(kUiInset + 24, kUiBodyY + 24, "还没有保存的卡片", ui_font_body);
-    DrawProductFooterLocked("返回", "打开", "留屏", "首页");
+    if (row == 0) DrawText(kUiInset, 200, "还没有保存的卡片", ui_font_body);
+    DrawProductControlRailLocked(nullptr);
 }
 
 void RawDisplay::DrawProductCardDetailLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("卡片详情");
-    DrawText(kUiInset, kUiTitleY + 2, "卡片详情", ui_font_title);
-    StrokeRect(kUiInset, kUiBodyY, kUiContentWidth, 360, kUiCardStroke);
-    DrawText(kUiInset + 24, kUiBodyY + 24, "整理今天的工作重点", ui_font_body);
-    DrawText(kUiInset + 24, kUiBodyY + 80, "来源：小智 AI 结果", ui_font_small);
-    DrawText(kUiInset + 24, kUiBodyY + 126, "内容", ui_font_small);
-    DrawText(kUiInset + 24, kUiBodyY + 166, "今天先完成最重要的一件事，", ui_font_status);
-    DrawText(kUiInset + 24, kUiBodyY + 202, "完成后再安排下一步。", ui_font_status);
-    DrawText(kUiInset + 24, kUiBodyY + 274, "创建时间：刚刚", ui_font_small);
-    DrawProductFooterLocked("返回", "留屏", "编辑", "更多");
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("卡片详情", "01");
+    DrawText(kUiInset, 168, "来源 / 小智 AI 结果", ui_font_small);
+    DrawText(kUiInset, 228, "整理今天的工作重点", ui_font_body);
+    DrawText(kUiInset, 304, "今天先完成最重要的一件事，", ui_font_status);
+    DrawText(kUiInset, 344, "完成后再安排下一步。", ui_font_status);
+    FillRect(kUiInset, 448, kUiContentWidth, 1, true);
+    DrawText(kUiInset, 470, "创建时间 / 刚刚", ui_font_small);
+    DrawText(kUiInset, 680, "NEXT 留屏", ui_font_small);
+    DrawProductControlRailLocked(nullptr);
 }
 
 void RawDisplay::DrawProductKeepLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    // Keep-screen deliberately has no status bar, battery, network or footer.
-    DrawText(kUiInset, 56, "留屏", ui_font_title);
-    FillRect(kUiInset, 112, kUiContentWidth, 1, true);
-    DrawText(kUiInset + 24, 144, "整理今天的工作重点", ui_font_body);
-    DrawText(kUiInset + 24, 204, "今天先完成最重要的一件事，", ui_font_status);
-    DrawText(kUiInset + 24, 244, "完成后再安排下一步。", ui_font_status);
-    DrawText(kUiInset + 24, 344, "来源：小智 AI 结果", ui_font_small);
-    DrawText(kUiInset + 24, 380, "快照时间：进入留屏时", ui_font_small);
-    DrawText(kUiInset + 24, 460, "设备将在唤醒后返回原页面", ui_font_small);
+    DrawText(kUiInset, 32, "MIAO / INK", ui_font_small);
+    DrawText(kUiInset, 160, "整理今天的工作重点", ui_font_title);
+    FillRect(kUiInset, 244, 48, 2, true);
+    DrawText(kUiInset, 288, "今天先完成最重要的一件事，", ui_font_status);
+    DrawText(kUiInset, 328, "完成后再安排下一步。", ui_font_status);
+    DrawText(kUiInset, 648, "留屏 / 小智 AI 结果", ui_font_small);
+    DrawProductControlRailLocked("点击屏幕或按键返回首页");
 }
 
 void RawDisplay::DrawProductWorkbenchLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("工作台");
-    DrawText(kUiInset, kUiTitleY + 2, "工作台", ui_font_title);
-    static constexpr const char* kTools[] = {"同步天气与额度", "刷新 AI 摘要", "显示测试页", "查看设备状态"};
-    for (int i = 0; i < 4; ++i) {
-        const int y = kUiBodyY + i * 82;
-        StrokeRect(kUiInset, y, kUiContentWidth, 68, kUiCardStroke);
-        DrawText(kUiInset + 20, y + 18, kTools[i], ui_font_body);
-        DrawText(kUiInset + 408, y + 13, ">", ui_font_title);
-    }
-    DrawProductFooterLocked("返回", "刷新", "设置", "首页");
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("设备状态", "INFO");
+    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+    DrawText(32, 152, "网络", ui_font_small);
+    DrawProductLabelLocked(32, 188, 416, snapshot.network, ui_font_body);
+    DrawText(32, 272, "天气", ui_font_small);
+    char text[96];
+    if (snapshot.weather.valid) std::snprintf(text,sizeof(text),"%d°  %s",snapshot.weather.temperature_c,snapshot.weather.condition);
+    else std::snprintf(text,sizeof(text),"等待更新");
+    DrawProductLabelLocked(32, 308, 416, text, ui_font_body);
+    dashboard::FormatWeatherStatus(snapshot.weather,text,sizeof(text));
+    DrawProductLabelLocked(32, 352, 416, text, ui_font_small);
+    DrawText(32, 436, "额度", ui_font_small);
+    if (snapshot.quota.valid) std::snprintf(text,sizeof(text),"5 小时 %d%%  /  本周 %d%%",std::clamp<int>(snapshot.quota.five_hour_remaining,0,100),std::clamp<int>(snapshot.quota.weekly_remaining,0,100));
+    else std::snprintf(text,sizeof(text),"--");
+    DrawProductLabelLocked(32, 472, 416, text, ui_font_status);
+    dashboard::FormatQuotaStatus(snapshot.quota,text,sizeof(text));
+    DrawProductLabelLocked(32, 520, 416, text, ui_font_small);
+    DrawProductControlRailLocked("PREV 返回设备选项");
 }
 
 void RawDisplay::DrawProductSettingsLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("设置");
-    DrawText(kUiInset, kUiTitleY + 2, "设置", ui_font_title);
-    static constexpr const char* kItems[] = {"布局方向", "网络连接", "省电策略", "关于设备"};
-    static constexpr const char* kValues[] = {"竖屏（默认）", "离线", "自动", "RAW SSD1677"};
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("系统信息", "INFO");
+    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+    const char* items[] = {"布局方向", "网络连接", "省电策略", "关于设备"};
+    const char* values[] = {"竖屏", snapshot.network, "自动", "MIAO / INK"};
     for (int i = 0; i < 4; ++i) {
-        const int y = kUiBodyY + i * 82;
-        StrokeRect(kUiInset, y, kUiContentWidth, 68, kUiCardStroke);
-        DrawText(kUiInset + 20, y + 10, kItems[i], ui_font_body);
-        DrawText(kUiInset + 20, y + 41, kValues[i], ui_font_small);
-        DrawText(kUiInset + 408, y + 13, ">", ui_font_title);
+        DrawText(32, 152 + i * 120, items[i], ui_font_small);
+        DrawProductLabelLocked(32, 192 + i * 120, 416, values[i], ui_font_body);
     }
-    DrawProductFooterLocked("返回", "切换方向", "工作台", "首页");
+    DrawProductControlRailLocked(nullptr);
 }
 
 void RawDisplay::DrawProductConfirmationLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("确认");
-    DrawText(kUiInset, kUiTitleY + 2, "请确认", ui_font_title);
-    StrokeRect(kUiInset, kUiBodyY, kUiContentWidth, 240, kUiCardStroke);
-    DrawText(kUiInset + 24, kUiBodyY + 28, "任务尚未创建", ui_font_body);
-    DrawText(kUiInset + 24, kUiBodyY + 92, "确认草稿后才会加入今日清单。", ui_font_status);
-    DrawText(kUiInset + 24, kUiBodyY + 146, "保存原文和 AI 整理结果不会自动创建任务。", ui_font_small);
-    DrawProductFooterLocked("返回编辑", "确认创建", "留屏", "首页");
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("请确认", "NOTE");
+    DrawText(kUiInset, 192, "任务尚未创建", ui_font_body);
+    DrawText(kUiInset, 256, "确认草稿后才会加入今日清单。", ui_font_status);
+    DrawText(kUiInset, 312, "保存原文和整理结果", ui_font_small);
+    DrawText(kUiInset, 344, "不会自动创建任务。", ui_font_small);
+    FillRect(kUiInset, 424, kUiContentWidth, 1, true);
+    DrawText(kUiInset, 464, "PREV 返回编辑 / AI 键说话", ui_font_status);
+    DrawProductControlRailLocked(nullptr);
 }
 
 void RawDisplay::DrawProductMoreLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked("更多");
-    DrawText(kUiInset, kUiTitleY + 2, "更多", ui_font_title);
-    static constexpr const char* kItems[] = {"工作台", "设备测试", "刷新数据", "关于本项目"};
-    for (int i = 0; i < 4; ++i) {
-        const int y = kUiBodyY + i * 82;
-        StrokeRect(kUiInset, y, kUiContentWidth, 68, kUiCardStroke);
-        DrawText(kUiInset + 20, y + 18, kItems[i], ui_font_body);
-        DrawText(kUiInset + 408, y + 13, ">", ui_font_title);
-    }
-    DrawProductFooterLocked("返回", "工作台", "设置", "首页");
+    DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("设备选项", "设备");
+    static constexpr const char* items[] = {"设备状态", "刷新数据", "系统信息", "屏幕测试"};
+    static constexpr const char* details[] = {"网络、天气与额度", "重新获取天气与额度", "布局、连接与省电", "显示与刷新诊断"};
+    static constexpr lucide::Id icons[]={lucide::Id::Info,lucide::Id::RefreshCw,lucide::Id::Settings2,lucide::Id::Monitor};
+    for (int i=0;i<4;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],items[i],details[i],navigation_index_==i);
+    DrawProductControlRailLocked("PREV 返回首页");
 }
 
 void RawDisplay::DrawProductScreenLocked() {
+    // Mark the revision before drawing every page. Recording it afterwards
+    // could swallow a provider update that arrives while pixels are drawn.
+    last_dashboard_revision_ = dashboard::DashboardData::GetInstance().Revision();
+    last_conversation_revision_ = xiaozhi::Conversation::GetInstance().Revision();
+    last_recorder_revision_ = xiaozhi::AudioSession::GetInstance().RecorderState().revision;
+    last_notes_revision_ = notes::DeviceStore().Revision();
+    if (reminder_alert_.active) {
+        DrawReminderAlertLocked();
+        return;
+    }
     switch (product_page_) {
         case ProductPage::Home: DrawProductHomeLocked(); break;
         case ProductPage::AiResult: DrawProductAiLocked(false); break;
@@ -2342,6 +3062,10 @@ void RawDisplay::DrawProductScreenLocked() {
         case ProductPage::Settings: DrawProductSettingsLocked(); break;
         case ProductPage::Confirmation: DrawProductConfirmationLocked(); break;
         case ProductPage::More: DrawProductMoreLocked(); break;
+        case ProductPage::Alarm: DrawProductAlarmLocked(); break;
+        case ProductPage::Recorder: DrawProductRecorderLocked(); break;
+        case ProductPage::Notes: DrawProductNotesLocked(false); break;
+        case ProductPage::NoteDetail: DrawProductNotesLocked(true); break;
     }
 }
 
@@ -2382,33 +3106,34 @@ bool RawDisplay::RecoverPanelForBinaryLocked() {
     panel_history_valid_ = false;
     window_baseline_valid_ = false;
     fast_refresh_count_ = 0;
+    refresh_changed_bytes_ = 0;
     return true;
 }
 
-void RawDisplay::FlushPartialLocked(int x, int y, int w, int h, bool incremental_du) {
+bool RawDisplay::FlushPartialLocked(int x, int y, int w, int h, bool incremental_du) {
     if (panel_region_fb_ == nullptr || !panel_history_valid_ || w <= 0 || h <= 0 ||
         (x & 7) != 0 || (w & 7) != 0 || x < 0 || y < 0 || x + w > kPanelW || y + h > kPanelH) {
         FlushLocked();
-        return;
+        return false;
     }
     const bool animation_wait = animation_running_;
     if ((animation_wait ? epaper_panel_wait_busy_timeout(panel_, 3000)
                         : epaper_panel_wait_busy(panel_)) != ESP_OK) {
         if (animation_wait) animation_running_ = false;
-        return;
+        return false;
     }
     const int stride = kPanelW / 8;
     const int row_bytes = w / 8;
 
-    // Paper Mono seeds both SSD1677 RAM roles with the last committed frame
-    // once, because a previous activation may have consumed/swapped them.
+    // Seed both SSD1677 RAM roles with the last committed frame once, because
+    // a previous activation may have consumed/swapped them.
     const bool seed_baseline = !window_baseline_valid_;
+    window_baseline_valid_ = false;
     if (seed_baseline) {
         epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
-        if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return;
+        if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return false;
         epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
-        if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return;
-        window_baseline_valid_ = true;
+        if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return false;
     }
 
     for (int row = 0; row < h; ++row) {
@@ -2416,26 +3141,34 @@ void RawDisplay::FlushPartialLocked(int x, int y, int w, int h, bool incremental
                     panel_fb_ + (y + row) * stride + x / 8, row_bytes);
     }
     epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
-    if (esp_lcd_panel_draw_bitmap(panel_, x, y, x + w, y + h, panel_region_fb_) != ESP_OK) return;
-    for (int row = 0; row < h; ++row) {
-        std::memcpy(panel_region_fb_ + row * row_bytes,
-                    panel_prev_fb_ + (y + row) * stride + x / 8, row_bytes);
+    if (esp_lcd_panel_draw_bitmap(panel_, x, y, x + w, y + h, panel_region_fb_) != ESP_OK) return false;
+    if (!incremental_du) {
+        epaper::CopyPreviousWithOutlineCleanup(panel_region_fb_, panel_prev_fb_, panel_fb_,
+                                              kPanelW, kPanelH, x, y, w, h);
+    } else {
+        for (int row = 0; row < h; ++row) {
+            std::memcpy(panel_region_fb_ + row * row_bytes,
+                        panel_prev_fb_ + (y + row) * stride + x / 8, row_bytes);
+        }
     }
     epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
-    if (esp_lcd_panel_draw_bitmap(panel_, x, y, x + w, y + h, panel_region_fb_) != ESP_OK) return;
-    epaper_panel_set_refresh_mode(
-        panel_, incremental_du ? SSD1677_EPAPER_REFRESH_DU
-                               : (seed_baseline ? SSD1677_EPAPER_REFRESH_PARTIAL
-                                                : SSD1677_EPAPER_REFRESH_PARTIAL_WARM));
+    if (esp_lcd_panel_draw_bitmap(panel_, x, y, x + w, y + h, panel_region_fb_) != ESP_OK) return false;
+    // Normal UI updates must reload the panel's temperature-selected OTP
+    // partial waveform. The resident 0x0C path belongs to custom-LUT tests.
+    epaper_panel_set_refresh_mode(panel_, incremental_du ? SSD1677_EPAPER_REFRESH_DU
+                                                       : SSD1677_EPAPER_REFRESH_PARTIAL);
     if (epaper_panel_refresh_screen(panel_) != ESP_OK) {
         if (animation_wait) animation_running_ = false;
-        return;
+        panel_history_valid_ = false;
+        return false;
     }
-    const esp_err_t wait_err = animation_wait ? epaper_panel_wait_refresh_timeout(panel_, 3000)
-                                              : epaper_panel_wait_busy(panel_);
+    // MASTER_ACTIVATION may return before BUSY rises. Wait for the complete
+    // waveform before synchronizing either RAM plane or the software history.
+    const esp_err_t wait_err = epaper_panel_wait_refresh_timeout(panel_, animation_wait ? 3000 : 15000);
     if (wait_err != ESP_OK) {
         if (animation_wait) animation_running_ = false;
         ESP_LOGW(TAG, "partial refresh wait failed: %s", esp_err_to_name(wait_err));
+        panel_history_valid_ = false;
         /* A failed experimental waveform must not poison the next button
          * press.  Reset/reinitialize the controller and force a known B/W
          * baseline before another differential window is attempted. */
@@ -2444,46 +3177,82 @@ void RawDisplay::FlushPartialLocked(int x, int y, int w, int h, bool incremental
             panel_history_valid_ = false;
             window_baseline_valid_ = false;
             fast_refresh_count_ = 0;
+            refresh_changed_bytes_ = 0;
         } else {
             ESP_LOGW(TAG, "partial refresh recovery failed");
         }
-        return;
+        return false;
     }
 
     // Commit this rectangle and make both controller roles equal to the new
     // target before the next window, matching Paper Mono's displayWindow().
-    for (int row = 0; row < h; ++row) {
-        std::memcpy(panel_prev_fb_ + (y + row) * stride + x / 8,
-                    panel_fb_ + (y + row) * stride + x / 8, row_bytes);
-    }
-    UpdateGlassBinaryLocked(x, y, w, h);
+    panel_history_valid_ = false;
     for (int row = 0; row < h; ++row) {
         std::memcpy(panel_region_fb_ + row * row_bytes,
                     panel_fb_ + (y + row) * stride + x / 8, row_bytes);
     }
     epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
     if (esp_lcd_panel_draw_bitmap(panel_, x, y, x + w, y + h,
-                                  panel_region_fb_) != ESP_OK) return;
+                                  panel_region_fb_) != ESP_OK) return false;
     epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
     if (esp_lcd_panel_draw_bitmap(panel_, x, y, x + w, y + h,
-                                  panel_region_fb_) != ESP_OK) return;
+                                  panel_region_fb_) != ESP_OK) return false;
+    for (int row = 0; row < h; ++row) {
+        std::memcpy(panel_prev_fb_ + (y + row) * stride + x / 8,
+                    panel_fb_ + (y + row) * stride + x / 8, row_bytes);
+    }
+    UpdateGlassBinaryLocked(x, y, w, h);
+    panel_history_valid_ = true;
     window_baseline_valid_ = true;
+    return true;
+}
+
+bool RawDisplay::FlushBlackPulseLocked() {
+    const bool had_history = panel_history_valid_;
+    panel_history_valid_ = false;
+    window_baseline_valid_ = false;
+    if (epaper_panel_wait_busy(panel_) != ESP_OK) return false;
+
+    // Use the existing PSRAM history buffer as scratch while history is
+    // invalid. The panel driver copies PSRAM into its DMA bounce buffer.
+    // Unknown glass (boot/recovery) needs a white->black drive everywhere.
+    if (!had_history) std::memset(panel_prev_fb_, kWhite, panel_size_);
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return false;
+    std::memset(panel_prev_fb_, 0, panel_size_);
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return false;
+    epaper_panel_set_refresh_mode(panel_, SSD1677_EPAPER_REFRESH_PARTIAL);
+    if (epaper_panel_refresh_screen(panel_) != ESP_OK ||
+        epaper_panel_wait_refresh_timeout(panel_, 15000) != ESP_OK) return false;
+
+    // One visible black pulse, then the target. Synchronize both RAM roles
+    // after each waveform, since the controller may swap them on activation.
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return false;
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) return false;
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_fb_) != ESP_OK) return false;
+    if (epaper_panel_refresh_screen(panel_) != ESP_OK ||
+        epaper_panel_wait_refresh_timeout(panel_, 15000) != ESP_OK) return false;
+
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_fb_) != ESP_OK) return false;
+    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
+    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_fb_) != ESP_OK) return false;
+    std::memcpy(panel_prev_fb_, panel_fb_, panel_size_);
+    UpdateGlassBinaryLocked(0, 0, kPanelW, kPanelH);
+    panel_history_valid_ = true;
+    window_baseline_valid_ = true;
+    fast_refresh_count_ = 0;
+    refresh_changed_bytes_ = 0;
+    return true;
 }
 
 void RawDisplay::FlushLocked() {
     if (portrait_fb_ == nullptr || panel_fb_ == nullptr || panel_prev_fb_ == nullptr) return;
-
     if (!RecoverPanelForBinaryLocked()) return;
-
-    // EPD updates are asynchronous.  Drain the previous waveform before
-    // touching either VRAM plane; otherwise draw_bitmap rejects the write
-    // with ESP_ERR_NOT_FINISHED and stale data gets refreshed repeatedly.
-    if (epaper_panel_wait_busy(panel_) != ESP_OK) {
-        ESP_LOGW(TAG, "wait BUSY before refresh failed");
-        panel_history_valid_ = false;
-        window_baseline_valid_ = false;
-        return;
-    }
 
     for (int py = 0; py < kPortraitH; ++py) for (int px = 0; px < kPortraitW; ++px) {
         const bool white = (portrait_fb_[static_cast<size_t>(py) * (kPortraitW / 8) + (px >> 3)] & (0x80 >> (px & 7))) != 0;
@@ -2492,58 +3261,34 @@ void RawDisplay::FlushLocked() {
         if (white) b |= static_cast<uint8_t>(0x80 >> (sx & 7)); else b &= static_cast<uint8_t>(~(0x80 >> (sx & 7)));
     }
 
-    // Match EegoRead's unchanged-frame guard.  A redundant waveform is still
-    // visible on e-paper (and needlessly consumes panel lifetime), even when
-    // the rendered status bar did not change.
-    if (panel_history_valid_ && std::memcmp(panel_prev_fb_, panel_fb_, panel_size_) == 0) {
-        return;
+    const auto damage = epaper::FindBinaryDamage(panel_prev_fb_, panel_fb_, kPanelW, kPanelH,
+                                                epaper::kBinaryOutlineRadius);
+    if (panel_history_valid_ && damage.changed_bytes == 0) return;
+    const bool gc = panel_region_fb_ == nullptr ||
+                    epaper::NeedsBinaryCleanup(panel_history_valid_, fast_refresh_count_,
+                                                refresh_changed_bytes_, panel_size_);
+    const int64_t started_us = esp_timer_get_time();
+    if (!gc) {
+        // One temperature-selected differential activation per changed frame.
+        if (!FlushPartialLocked(damage.x, damage.y, damage.width, damage.height)) return;
+        ++fast_refresh_count_;
+        refresh_changed_bytes_ += damage.changed_bytes;
+    } else {
+        // FULL/FULL_FAST contain multiple optical inversions on this panel.
+        // Two standard partial phases give one black pulse and then restore.
+        if (!FlushBlackPulseLocked()) {
+            ESP_LOGW(TAG, "black-pulse cleanup failed; baseline invalid");
+            if (epaper_panel_recover(panel_) != ESP_OK) {
+                ESP_LOGW(TAG, "black-pulse controller recovery failed");
+            }
+            return;
+        }
     }
-
-    // Keep the SSD1677 ordering from the validated bring-up image: current
-    // plane first, then the auxiliary plane.  Unlike EegoRead's UC8279C,
-    // SSD1677's full waveform bypasses RED, so do not reinterpret that plane
-    // as a DTM1 register.
-    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_CURRENT);
-    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_fb_) != ESP_OK) {
-        ESP_LOGW(TAG, "write current framebuffer failed");
-        return;
-    }
-    epaper_panel_set_bitmap_color(panel_, SSD1677_EPAPER_BITMAP_PREVIOUS);
-    if (esp_lcd_panel_draw_bitmap(panel_, 0, 0, kPanelW, kPanelH, panel_prev_fb_) != ESP_OK) {
-        ESP_LOGW(TAG, "write auxiliary framebuffer failed");
-        return;
-    }
-
-    const bool gc = !panel_history_valid_ || fast_refresh_count_ >= kFullRefreshEvery;
-    /*
-     * SSD1677's OTP FULL_FAST (0xD7) is not a one-flash waveform: it runs
-     * several white/black phases and is visibly worse than a full-screen
-     * differential update.  Use the controller's PARTIAL waveform for the
-     * normal fast path instead.  With PREVIOUS and CURRENT already loaded
-     * for the whole frame, this is the same single-pulse strategy used by
-     * the LVGL adapter.  Keep the occasional OTP FULL pass for ghost cleanup.
-     */
-    epaper_panel_set_refresh_mode(panel_, gc ? SSD1677_EPAPER_REFRESH_FULL
-                                             : SSD1677_EPAPER_REFRESH_PARTIAL);
-    if (epaper_panel_refresh_screen(panel_) != ESP_OK) {
-        ESP_LOGW(TAG, "EPD refresh start failed");
-        panel_history_valid_ = false;
-        window_baseline_valid_ = false;
-        return;
-    }
-    // Keep the software and controller histories in lockstep, and do not
-    // start a second waveform while BUSY is asserted.
-    if (epaper_panel_wait_refresh_timeout(panel_, 15000) != ESP_OK) {
-        ESP_LOGW(TAG, "wait BUSY after refresh failed");
-        panel_history_valid_ = false;
-        window_baseline_valid_ = false;
-        return;
-    }
-    std::memcpy(panel_prev_fb_, panel_fb_, panel_size_);
-    UpdateGlassBinaryLocked(0, 0, kPanelW, kPanelH);
-    panel_history_valid_ = true;
-    window_baseline_valid_ = false;
-    fast_refresh_count_ = gc ? 0 : fast_refresh_count_ + 1;
+    ESP_LOGI(TAG, "refresh=%s window=%d,%d,%d,%d changed=%u partials=%lu phases=%d elapsed_ms=%lu",
+             gc ? "black-pulse" : "partial", gc ? 0 : damage.x, gc ? 0 : damage.y,
+             gc ? kPanelW : damage.width, gc ? kPanelH : damage.height,
+             static_cast<unsigned>(damage.changed_bytes), static_cast<unsigned long>(fast_refresh_count_), gc ? 2 : 1,
+             static_cast<unsigned long>((esp_timer_get_time() - started_us) / 1000));
 }
 
 void RawDisplay::FlushGray4Locked(const uint8_t* lsb, const uint8_t* msb,
@@ -2594,6 +3339,7 @@ void RawDisplay::FlushGray4Locked(const uint8_t* lsb, const uint8_t* msb,
         }
     }
     fast_refresh_count_ = 0;
+    refresh_changed_bytes_ = 0;
 }
 
 void RawDisplay::FlushWipeTestLocked(int strip_width) {
@@ -2882,6 +3628,7 @@ void RawDisplay::RunPaperMonoTestLocked() {
     panel_history_valid_ = false;
     window_baseline_valid_ = false;
     fast_refresh_count_ = 0;
+    refresh_changed_bytes_ = 0;
     panel_custom_waveform_active_ = true;
 }
 
@@ -3111,6 +3858,7 @@ void RawDisplay::RunPaperMonoTextTestLocked() {
     panel_history_valid_ = false;
     window_baseline_valid_ = false;
     fast_refresh_count_ = 0;
+    refresh_changed_bytes_ = 0;
     panel_custom_waveform_active_ = true;
 }
 
@@ -3353,6 +4101,7 @@ void RawDisplay::RunPaperMonoPageTestLocked() {
     panel_history_valid_ = false;
     window_baseline_valid_ = false;
     fast_refresh_count_ = 0;
+    refresh_changed_bytes_ = 0;
     panel_custom_waveform_active_ = true;
 }
 
@@ -3618,7 +4367,8 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
     }
     if (!update_all && tmv.tm_min == last_minute_ && battery_percent_ == last_drawn_battery_ &&
         charging_ == last_drawn_charging_ && dashboard_revision == last_dashboard_revision_ &&
-        !notification_expired) return;
+        xiaozhi::Conversation::GetInstance().Revision() == last_conversation_revision_ &&
+        xiaozhi::AudioSession::GetInstance().RecorderState().revision == last_recorder_revision_ && !notification_expired && notes::DeviceStore().Revision()==last_notes_revision_) return;
     last_minute_ = tmv.tm_min;
     last_drawn_battery_ = battery_percent_;
     last_drawn_charging_ = charging_;

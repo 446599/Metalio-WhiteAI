@@ -1,0 +1,58 @@
+/*
+ * SPDX-FileCopyrightText: 2026
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#pragma once
+
+#include <stdint.h>
+
+/* SSD1677 panel commands (GDEM0397T81 800x480) */
+
+#define SSD1677_CMD_SWRST                    0x12
+#define SSD1677_CMD_DRIVER_OUTPUT_CTRL       0x01
+#define SSD1677_CMD_BOOSTER_SOFT_START       0x0C
+#define SSD1677_CMD_DEEP_SLEEP               0x10
+#define SSD1677_CMD_DATA_ENTRY_MODE          0x11
+#define SSD1677_CMD_TEMP_SENSOR_CTRL         0x18
+#define SSD1677_CMD_MASTER_ACTIVATION        0x20
+#define SSD1677_CMD_DISP_UPDATE_CTRL1        0x21
+#define SSD1677_CMD_DISP_UPDATE_CTRL2        0x22
+#define SSD1677_CMD_WRITE_BW_VRAM            0x24
+#define SSD1677_CMD_WRITE_RED_VRAM           0x26
+#define SSD1677_CMD_AUTO_WRITE_BW_RAM        0x46
+#define SSD1677_CMD_AUTO_WRITE_RED_RAM       0x47
+#define SSD1677_CMD_WRITE_TEMP_REG           0x1A
+#define SSD1677_CMD_WRITE_LUT                0x32
+#define SSD1677_CMD_GATE_VOLTAGE             0x03
+#define SSD1677_CMD_SOURCE_VOLTAGE           0x04
+#define SSD1677_CMD_WRITE_VCOM               0x2C
+#define SSD1677_CMD_SET_BORDER_WAVEFORM      0x3C
+#define SSD1677_CMD_SET_RAMX_START_END_POS   0x44
+#define SSD1677_CMD_SET_RAMY_START_END_POS   0x45
+#define SSD1677_CMD_SET_INIT_X_ADDR_COUNTER  0x4E
+#define SSD1677_CMD_SET_INIT_Y_ADDR_COUNTER  0x4F
+
+#define SSD1677_PARAM_DATA_ENTRY_MODE_XY_INC_Y_DEC 0x01
+#define SSD1677_PARAM_BORDER_WAVEFORM              0x01
+/** 边框波形跟 VCOM（局刷/关机全刷共用，减轻边缘发灰） */
+#define SSD1677_PARAM_BORDER_WAVEFORM_VCOM         0x80
+#define SSD1677_PARAM_TEMP_SENSOR_INTERNAL         0x80
+/** A[1:0]=11：进入 Deep Sleep（0x01 仅 A[1:0]=01，控制器不会真正休眠） */
+#define SSD1677_PARAM_DEEP_SLEEP                   0x03
+
+#define SSD1677_PARAM_DISP_UPDATE_CTRL1_BYPASS_RED 0x40
+#define SSD1677_PARAM_DISP_UPDATE_CTRL1_NORMAL     0x00
+
+#define SSD1677_PARAM_DISP_UPDATE_FULL             0xF7
+#define SSD1677_PARAM_DISP_UPDATE_FULL_FAST        0xD7
+#define SSD1677_PARAM_DISP_UPDATE_PARTIAL          0xFC
+#define SSD1677_PARAM_DISP_UPDATE_PARTIAL_WARM     0x0C
+#define SSD1677_PARAM_DISP_UPDATE_DU               0x1C
+#define SSD1677_PARAM_DISP_UPDATE_EXTERNAL_LUT     0xCC
+#define SSD1677_PARAM_DISP_UPDATE_POWER_ON         0xE0
+#define SSD1677_PARAM_DISP_UPDATE_POWER_OFF        0x83
+
+#define SSD1677_PANEL_WIDTH                        800
+#define SSD1677_PANEL_HEIGHT                       480
+#define SSD1677_PANEL_BUFFER_SIZE                  (SSD1677_PANEL_WIDTH * SSD1677_PANEL_HEIGHT / 8)

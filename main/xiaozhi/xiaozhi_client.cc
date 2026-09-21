@@ -1,0 +1,758 @@
+#include "xiaozhi_client.h"
+#include "reminders/reminder_service.h"
+
+#include "board.h"
+#include "dashboard/dashboard_data.h"
+#include "hal/hal.h"
+#include "settings.h"
+#include "system_info.h"
+#include "xiaozhi/xiaozhi_activation.h"
+#include "xiaozhi/xiaozhi_audio.h"
+
+#include <cJSON.h>
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <freertos/task.h>
+#include <web_socket.h>
+
+#include <algorithm>
+#include <cstring>
+#include <string>
+
+namespace xiaozhi {
+namespace {
+
+constexpr const char* kTag = "Xiaozhi";
+constexpr const char* kDefaultUrl = "wss://api.tenclass.net/xiaozhi/v1/";
+// This is the public placeholder used by the reference Xiaozhi clients.  A
+// deployment may replace it with its own token through the xiaozhi NVS keys.
+constexpr const char* kDefaultToken = "12345678";
+constexpr int kHelloFrameDurationMs = 60;
+constexpr uint8_t kActionListenStart = 1;
+constexpr uint8_t kActionListenStop = 2;
+constexpr uint8_t kActionPrompt = 4;
+// A voice turn should not wait half a minute after a transport drop, and the
+// server closes idle sessions on its own schedule.
+constexpr int64_t kReconnectIntervalMs = 5 * 1000;
+constexpr int64_t kPingIntervalMs = 20 * 1000;
+
+const char* StringItem(const cJSON* object, const char* key) {
+    if (object == nullptr || !cJSON_IsObject(object)) return nullptr;
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(object, key);
+    return item != nullptr && cJSON_IsString(item) ? item->valuestring : nullptr;
+}
+
+int IntItem(const cJSON* object, const char* key, int fallback) {
+    if (object == nullptr || !cJSON_IsObject(object)) return fallback;
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(object, key);
+    return item != nullptr && cJSON_IsNumber(item) ? item->valueint : fallback;
+}
+
+void PrefixText(char* out, size_t out_size, const char* prefix, const char* text) {
+    if (out == nullptr || out_size == 0) return;
+    out[0] = '\0';
+    if (prefix == nullptr) prefix = "";
+    const size_t prefix_bytes = std::min(std::strlen(prefix), out_size - 1);
+    std::memcpy(out, prefix, prefix_bytes);
+    out[prefix_bytes] = '\0';
+    if (prefix_bytes + 1 < out_size) {
+        dashboard::CopyText(out + prefix_bytes, out_size - prefix_bytes, text);
+    }
+}
+
+std::string JsonEscape(const std::string& value) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (const unsigned char ch : value) {
+        switch (ch) {
+            case '"': escaped += "\\\""; break;
+            case '\\': escaped += "\\\\"; break;
+            case '\b': escaped += "\\b"; break;
+            case '\f': escaped += "\\f"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default:
+                if (ch < 0x20U) {
+                    escaped += "\\u00";
+                    escaped.push_back(kHex[(ch >> 4) & 0x0fU]);
+                    escaped.push_back(kHex[ch & 0x0fU]);
+                } else {
+                    escaped.push_back(static_cast<char>(ch));
+                }
+                break;
+        }
+    }
+    return escaped;
+}
+
+// The board declares its own microphone rate, which is fixed by the I2S clock.
+// The server answers with the rate it encodes TTS audio at, and that difference
+// is handled by the audio session rather than by the transport.  `version`
+// selects the binary framing and must match the Protocol-Version header.
+std::string BuildHello(int input_sample_rate, int version) {
+    char hello[256];
+    std::snprintf(hello, sizeof(hello),
+                  "{\"type\":\"hello\",\"version\":%d,\"features\":{\"mcp\":true},"
+                  "\"transport\":\"websocket\",\"audio_params\":{\"format\":\"opus\","
+                  "\"sample_rate\":%d,\"channels\":1,\"frame_duration\":%d}}",
+                  version, input_sample_rate, kHelloFrameDurationMs);
+    return std::string(hello);
+}
+
+}  // namespace
+
+Client& Client::GetInstance() {
+    static Client instance;
+    return instance;
+}
+
+void Client::Start() {
+    bool expected = false;
+    if (!started_.compare_exchange_strong(expected, true)) return;
+    LoadConfig();
+    if (!enabled_) {
+        ESP_LOGI(kTag, "disabled by NVS");
+        PublishStatus("小智未配置");
+        return;
+    }
+    // The audio path only ever hands compressed frames to the transport; it
+    // never touches the socket lifetime.
+    AudioSession::GetInstance().SetSender([this](const void* data, size_t length) {
+        return SendAudio(data, length);
+    });
+    PublishStatus("小智待连接");
+    ESP_LOGI(kTag, "started: websocket control bridge and opus audio path enabled");
+    if (xTaskCreatePinnedToCore(TaskEntry, "xiaozhi", 8192, this, 2, &task_handle_, 0) != pdPASS) {
+        ESP_LOGE(kTag, "failed to create Xiaozhi task");
+        started_.store(false);
+        task_handle_ = nullptr;
+    }
+}
+
+bool Client::ListenStart() {
+    auto& conversation = Conversation::GetInstance();
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    if (listen_requested_.load()) return true;
+    // No deferred recording: a key held while offline must be pressed again
+    // after connection, never unexpectedly capture later on reconnect.
+    if (!enabled_ || !connected_.load() || !IsSessionReady()) {
+        conversation.SetState(TurnState::Error, "AI 尚未连接，请联网后再按住说话");
+        return false;
+    }
+    if (turn_in_flight_) {
+        // There is no wire turn id or abort acknowledgement. A new socket is
+        // the isolation boundary for an interrupted/incomplete response.
+        InvalidateTransportLocked();
+        conversation.SetState(TurnState::Error, "正在重建会话，连接后请重新按住 AI 键");
+        if (task_handle_) xTaskNotifyGive(task_handle_);
+        return false;
+    }
+    ++intent_generation_;
+    conversation.Begin();
+    capture_started_.store(false);
+    followup_turn_.store(false);
+    pending_prompt_.clear();
+    accept_response_.store(false);
+    listen_requested_.store(true);
+    listen_started_ms_.store(esp_timer_get_time() / 1000);
+    response_started_ms_.store(0);
+    pending_action_.store(kActionListenStart);
+    if (task_handle_) xTaskNotifyGive(task_handle_);
+    return true;
+}
+
+bool Client::ListenStop() {
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    if (!listen_requested_.exchange(false)) return false;
+    ++intent_generation_;
+    // This happens immediately in the release callback, before TLS or e-paper.
+    AudioSession::GetInstance().StopCapture();
+    pending_action_.store(kActionListenStop);
+    if (task_handle_) xTaskNotifyGive(task_handle_);
+    return true;
+}
+
+bool Client::Abort() {
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    InvalidateTransportLocked();
+    Conversation::GetInstance().SetState(TurnState::Idle, "已停止，可重新按住 AI 键");
+    if (task_handle_) xTaskNotifyGive(task_handle_);
+    return true;
+}
+
+bool Client::RunQuickAction(QuickAction action) {
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    const auto snapshot = Conversation::GetInstance().Snapshot();
+    if (snapshot.transcript.empty()) {
+        Conversation::GetInstance().SetState(TurnState::Idle, "先按住 AI 键说出想法，再选择快捷操作");
+        return false;
+    }
+    if (listen_requested_.load() || snapshot.state == TurnState::Transcribing ||
+        snapshot.state == TurnState::Thinking || snapshot.state == TurnState::Speaking) return false;
+    if (!connected_.load() || !IsSessionReady() || turn_in_flight_) {
+        Conversation::GetInstance().SetState(TurnState::Error, "AI 离线，原文仍保留在本机");
+        return false;
+    }
+    pending_prompt_ = Conversation::Prompt(action, snapshot.transcript);
+    if (pending_prompt_.empty()) return false;
+    ++intent_generation_;
+    accept_response_.store(false);
+    followup_turn_.store(true);
+    Conversation::GetInstance().BeginFollowup("正在处理原文");
+    pending_action_.store(kActionPrompt);
+    if (task_handle_) xTaskNotifyGive(task_handle_);
+    return true;
+}
+
+void Client::SaveCapsule() {
+    const auto snapshot = Conversation::GetInstance().Snapshot();
+    if (snapshot.transcript.empty()) {
+        Conversation::GetInstance().MarkSaved(snapshot.turn, snapshot.content_revision, false);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(capsule_mutex_);
+        if (pending_capsule_.turn > snapshot.turn ||
+            (pending_capsule_.turn == snapshot.turn &&
+             pending_capsule_.content_revision > snapshot.content_revision)) return;
+        pending_capsule_ = snapshot;
+        Conversation::GetInstance().MarkSaving(snapshot.turn, snapshot.content_revision);
+        save_requested_.store(true);
+    }
+    if (task_handle_) xTaskNotifyGive(task_handle_);
+}
+
+void Client::RestoreCapsule() {
+    (void)Abort();
+    restore_requested_.store(true);
+    if (task_handle_) xTaskNotifyGive(task_handle_);
+}
+
+bool Client::IsListening() const {
+    return listen_requested_.load() || AudioSession::GetInstance().capturing();
+}
+
+bool Client::IsSessionReady() const {
+    std::lock_guard<std::mutex> lock(session_mutex_);
+    return !session_id_.empty();
+}
+
+void Client::TaskEntry(void* arg) {
+    auto* self = static_cast<Client*>(arg);
+    if (self != nullptr) self->Run();
+    vTaskDelete(nullptr);
+}
+
+void Client::LoadConfig() {
+    Settings settings("xiaozhi", false);
+    enabled_ = settings.GetBool("enabled", true);
+    url_ = settings.GetString("url", kDefaultUrl);
+    token_ = settings.GetString("token", kDefaultToken);
+    // Version 1 is the documented default and what the reference client uses
+    // unless a deployment opts into the version 2/3 framing.
+    audio_version_ = settings.GetInt("version", 1);
+    if (audio_version_ != 2 && audio_version_ != 3) {
+        audio_version_ = 1;
+    }
+    AudioSession::GetInstance().SetProtocolVersion(audio_version_);
+    if (url_.empty()) url_ = kDefaultUrl;
+    // NVS strings are bounded by the storage layer, but reject unexpectedly
+    // large values before they reach URL/header or heap-building code.
+    if (url_.size() > 512) url_.clear();
+    if (token_.size() > 512) token_.clear();
+}
+
+void Client::PublishStatus(const char* status) {
+    dashboard::DashboardData::GetInstance().SetAiStatus(status);
+}
+
+bool Client::NetworkReady() const {
+    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
+    return std::strstr(snapshot.network, "在线") != nullptr;
+}
+
+bool Client::ConnectOnce() {
+    auto* network = Board::GetInstance().GetNetwork();
+    if (network == nullptr || url_.empty()) return false;
+
+    auto candidate = network->CreateWebSocket(0);
+    if (!candidate) return false;
+    candidate->SetReceiveBufferSize(4096);
+    // Must match the framing used on the wire: the uplink wraps Opus in the
+    // version 3 header, so the server has to be told the same version.
+    const std::string version_text = std::to_string(audio_version_);
+    candidate->SetHeader("Protocol-Version", version_text.c_str());
+    const std::string device_id = SystemInfo::GetMacAddress();
+    const std::string client_id = Board::GetInstance().GetUuid();
+    candidate->SetHeader("Device-Id", device_id.c_str());
+    candidate->SetHeader("Client-Id", client_id.c_str());
+    if (!token_.empty()) {
+        const std::string authorization = std::string("Bearer ") + token_;
+        candidate->SetHeader("Authorization", authorization.c_str());
+    }
+    candidate->SetHeader("Accept-Language", "zh-CN");
+
+    uint32_t epoch;
+    {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        epoch = ++transport_epoch_;
+    }
+    candidate->OnConnected([this, epoch]() {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        if (epoch != transport_epoch_) return;
+        connected_.store(true);
+        last_ping_ms_.store(esp_timer_get_time() / 1000);
+        PublishStatus("小智在线");
+    });
+    candidate->OnDisconnected([this, epoch]() { HandleDisconnect(epoch); });
+    candidate->OnError([this, epoch](int /*error*/) { HandleDisconnect(epoch); });
+    candidate->OnData([this, epoch](const char* data, size_t length, bool binary) {
+        HandleData(epoch, data, length, binary);
+    });
+
+    PublishStatus("小智连接中");
+    if (!candidate->Connect(url_.c_str())) {
+        HandleDisconnect(epoch);
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        if (epoch != transport_epoch_) return false;
+        // Connect's success is authoritative if the transport callback was
+        // synchronous. A canceled candidate must never make us online again.
+        connected_.store(true);
+    }
+    {
+        std::lock_guard<std::mutex> lock(ws_mutex_);
+        websocket_ = std::move(candidate);
+    }
+    const int input_rate = GetHAL().AudioInputSampleRate();
+    if (!SendText(BuildHello(input_rate > 0 ? input_rate : 16000, audio_version_))) {
+        HandleDisconnect(epoch);
+        ReleaseTransport();
+        PublishStatus("小智重连中");
+        return false;
+    }
+    last_ping_ms_.store(esp_timer_get_time() / 1000);
+    ESP_LOGI(kTag, "websocket connected; hello sent");
+    return true;
+}
+
+bool Client::SendText(const std::string& message) {
+    std::lock_guard<std::mutex> lock(ws_mutex_);
+    if (!connected_.load() || websocket_ == nullptr || !websocket_->IsConnected()) return false;
+    return websocket_->Send(message);
+}
+
+bool Client::SendAudio(const void* data, size_t length) {
+    std::lock_guard<std::mutex> lock(ws_mutex_);
+    if (!listen_requested_.load() || !AudioSession::GetInstance().capturing() ||
+        !connected_.load() || websocket_ == nullptr || !websocket_->IsConnected()) return false;
+    return websocket_->Send(data, length, true);
+}
+
+void Client::ReleaseTransport() {
+    {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        InvalidateTransportLocked();
+    }
+    std::unique_ptr<WebSocket> socket;
+    {
+        std::lock_guard<std::mutex> lock(ws_mutex_);
+        socket = std::move(websocket_);
+    }
+    if (socket == nullptr) return;
+    socket->Close();
+    AudioSession::GetInstance().Reset();
+}
+
+void Client::EndListenWindowLocked() {
+    ++intent_generation_;
+    listen_requested_.store(false);
+    AudioSession::GetInstance().StopCapture();
+}
+
+void Client::InvalidateTransportLocked() {
+    ++transport_epoch_;
+    mcp_requests_.clear();
+    connected_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        session_id_.clear();
+    }
+    EndListenWindowLocked();
+    pending_action_.store(0);
+    pending_prompt_.clear();
+    accept_response_.store(false);
+    capture_started_.store(false);
+    response_started_ms_.store(0);
+    turn_in_flight_ = false;
+    playback_receiving_ = false;
+    AudioSession::GetInstance().Reset();
+}
+
+void Client::HandleDisconnect(uint32_t epoch) {
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    if (epoch != transport_epoch_) return;
+    InvalidateTransportLocked();
+    Conversation::GetInstance().SetState(TurnState::Error, "连接中断，请重新按住 AI 键");
+    PublishStatus("小智重连中");
+}
+
+void Client::SavePendingCapsule() {
+    ConversationSnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(capsule_mutex_);
+        if (!save_requested_.exchange(false)) return;
+        snapshot = std::move(pending_capsule_);
+    }
+    const bool saved = SaveLastCapsule(snapshot);
+    Conversation::GetInstance().MarkSaved(snapshot.turn, snapshot.content_revision, saved);
+}
+
+void Client::ServiceActivation() {
+    auto& activation = Activation::GetInstance();
+    if (!activation_done_) {
+        if (!activation.FetchConfig()) {
+            // Offline or the endpoint is down: keep the last known endpoint and
+            // let the normal reconnect cadence retry.
+            return;
+        }
+        activation_done_ = true;
+        // The server may have handed us its own WebSocket endpoint and token.
+        LoadConfig();
+        const Activation::State state = activation.Snapshot();
+        PublishActivationState(state);
+        if (state.has_code && !state.bound) {
+            ESP_LOGW(kTag, "device needs binding: enter the code shown on the panel");
+        }
+    }
+
+    const Activation::State state = activation.Snapshot();
+    if (!state.bound && (state.has_code || state.has_challenge)) {
+        if (activation.PollDue()) {
+            activation.MarkPolled();
+            if (activation.ActivateSupported()) {
+                (void)activation.Poll();
+            } else {
+                // Fallback for endpoints that reject the polling form: the
+                // server drops the activation code from the config response as
+                // soon as the device is bound.
+                (void)activation.FetchConfig();
+            }
+            // Re-publish every poll so a reconnect or a fresh hello cannot hide
+            // the code the user still has to enter.
+            PublishActivationState(activation.Snapshot());
+        }
+    }
+}
+
+void Client::SendPendingAction() {
+    uint8_t action;
+    uint32_t generation, epoch;
+    std::string message;
+    auto& audio = AudioSession::GetInstance();
+    auto& conversation = Conversation::GetInstance();
+    {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        action = pending_action_.exchange(0);
+        if (action == 0) return;
+        generation = intent_generation_;
+        epoch = transport_epoch_;
+        if (!connected_.load() || !IsSessionReady()) {
+            EndListenWindowLocked();
+            conversation.SetState(TurnState::Error, "AI 离线，请重试");
+            return;
+        }
+        std::string session;
+        {
+            std::lock_guard<std::mutex> session_lock(session_mutex_);
+            session = session_id_;
+        }
+        const std::string prefix = "{\"session_id\":\"" + JsonEscape(session) + "\",";
+        if (action == kActionListenStart || action == kActionPrompt) {
+            audio.Reset();
+            turn_in_flight_ = true;
+            playback_receiving_ = false;
+            if (action == kActionListenStart) {
+                message = prefix + "\"type\":\"listen\",\"state\":\"start\",\"mode\":\"manual\"}";
+            } else {
+                message = prefix + "\"type\":\"listen\",\"state\":\"detect\",\"text\":\"" + JsonEscape(pending_prompt_) + "\"}";
+                pending_prompt_.clear();
+                accept_response_.store(true);
+                response_started_ms_.store(esp_timer_get_time() / 1000);
+            }
+        } else if (action == kActionListenStop) {
+            const bool captured = capture_started_.exchange(false);
+            if (!captured) {
+                // A start may have reached the server while key-up raced TLS.
+                // Without recorded audio there is no completion to wait for.
+                if (turn_in_flight_) InvalidateTransportLocked();
+                conversation.SetState(TurnState::Idle, "按住 AI 键再说话，松手发送");
+                return;
+            }
+            message = prefix + "\"type\":\"listen\",\"state\":\"stop\"}";
+            accept_response_.store(true);
+            response_started_ms_.store(esp_timer_get_time() / 1000);
+            conversation.SetState(TurnState::Transcribing, "已松开，正在识别");
+        } else {
+            InvalidateTransportLocked();
+            return;
+        }
+    }
+    if (!SendText(message)) {
+        HandleDisconnect(epoch);
+        return;
+    }
+    if (action == kActionListenStart) {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        // A release/new press during SendText invalidates this start. No
+        // callback or successful reconnect is allowed to reopen the mic.
+        if (epoch != transport_epoch_ || generation != intent_generation_ || !listen_requested_.load()) return;
+        if (audio.StartCapture()) {
+            capture_started_.store(true);
+            conversation.SetState(TurnState::Listening, "松开 AI 键结束说话");
+            PublishStatus("小智聆听中");
+        } else {
+            InvalidateTransportLocked();
+            conversation.SetState(TurnState::Error, "麦克风不可用，请重试");
+        }
+    }
+}
+
+void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool binary) {
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    if (epoch != transport_epoch_ || !connected_.load()) return;
+    if (binary) {
+        if (!accept_response_.load() || !playback_receiving_) return;
+        if (response_started_ms_.load() > 0) response_started_ms_.store(esp_timer_get_time() / 1000);
+        // Opus packets are handled by the audio session; the JSON parser never
+        // sees compressed frames.
+        AudioSession::GetInstance().OnServerPacket(
+            reinterpret_cast<const uint8_t*>(data), length);
+        return;
+    }
+    if (data == nullptr || length == 0 || length > 8192) return;
+    cJSON* root = cJSON_ParseWithLength(data, length);
+    if (root == nullptr) return;
+    const char* type = StringItem(root, "type");
+    if (type == nullptr) {
+        cJSON_Delete(root);
+        return;
+    }
+    // Event names only, never payloads: enough to reconstruct the conversation
+    // timeline from the log without exposing transcripts or credentials.
+    if (json_events_logged_.fetch_add(1) < 60) {
+        ESP_LOGI(kTag, "event: %s", type);
+    }
+
+    if (std::strcmp(type, "hello") != 0) {
+        const auto* tagged_session = cJSON_GetObjectItemCaseSensitive(root, "session_id");
+        std::lock_guard<std::mutex> session_lock(session_mutex_);
+        if (session_id_.empty() || (tagged_session &&
+            (!cJSON_IsString(tagged_session) || session_id_ != tagged_session->valuestring))) {
+            cJSON_Delete(root); return;
+        }
+    }
+    if (std::strcmp(type, "hello") == 0) {
+        const char* session = StringItem(root, "session_id");
+        {
+            std::lock_guard<std::mutex> session_lock(session_mutex_);
+            if (!session || !*session || std::strlen(session) > 63 ||
+                (!session_id_.empty() && session_id_ != session)) { cJSON_Delete(root); return; }
+            session_id_ = session;
+        }
+        // The server may answer with its own audio parameters; the Opus path
+        // re-opens its handles on the next window when they differ.
+        const cJSON* params = cJSON_GetObjectItemCaseSensitive(root, "audio_params");
+        AudioSession::GetInstance().SetParams(IntItem(params, "sample_rate", 16000),
+                                             IntItem(params, "frame_duration", 60));
+        PublishStatus("小智在线");
+        dashboard::DashboardData::GetInstance().SetAiSummary(0, "小智已连接，等待你的下一步");
+        // The card is only useful if the pending binding code survives the
+        // hello banner, so the activation state is published after it.
+        PublishActivationState(Activation::GetInstance().Snapshot());
+    } else if (std::strcmp(type, "goodbye") == 0) {
+        InvalidateTransportLocked();
+        Conversation::GetInstance().SetState(TurnState::Error, "会话已断开，请重新按住 AI 键");
+        PublishStatus("小智待连接");
+    } else if (std::strcmp(type, "stt") == 0) {
+        if (!accept_response_.load() || followup_turn_.load()) { cJSON_Delete(root); return; }
+        const char* text = StringItem(root, "text");
+        if (text != nullptr && text[0] != '\0') {
+            Conversation::GetInstance().SetTranscript(text);
+            SaveCapsule();
+            char summary[80];
+            PrefixText(summary, sizeof(summary), "听到：", text);
+            dashboard::DashboardData::GetInstance().SetAiSummary(0, summary);
+            // The server has the utterance, so the microphone has done its job.
+            // Stopping here keeps the next turn a deliberate tap instead of a
+            // permanently open mic, and it never streams TTS back into the
+            // server.  An empty stt is a VAD tick, not a transcript.
+            EndListenWindowLocked();
+        }
+    } else if (std::strcmp(type, "llm") == 0) {
+        if (!accept_response_.load()) { cJSON_Delete(root); return; }
+        response_started_ms_.store(esp_timer_get_time() / 1000);
+        const char* text = StringItem(root, "text");
+        const char* emotion = StringItem(root, "emotion");
+        PublishStatus("小智思考中");
+        if (text != nullptr && text[0] != '\0') {
+            Conversation::GetInstance().ReceiveAnswer(text, false);
+            Conversation::GetInstance().SetState(TurnState::Thinking);
+            dashboard::DashboardData::GetInstance().SetAiSummary(1, text);
+        } else if (emotion != nullptr && emotion[0] != '\0') {
+            char summary[80];
+            PrefixText(summary, sizeof(summary), "状态：", emotion);
+            dashboard::DashboardData::GetInstance().SetAiSummary(1, summary);
+        }
+    } else if (std::strcmp(type, "tts") == 0) {
+        if (!accept_response_.load()) { cJSON_Delete(root); return; }
+        response_started_ms_.store(esp_timer_get_time() / 1000);
+        const char* state = StringItem(root, "state");
+        if (state != nullptr && std::strcmp(state, "start") == 0) {
+            EndListenWindowLocked();
+            playback_receiving_ = true;
+            AudioSession::GetInstance().OpenPlayback();
+            Conversation::GetInstance().SetState(TurnState::Speaking);
+            PublishStatus("小智说话中");
+        } else if (state != nullptr && std::strcmp(state, "sentence_start") == 0) {
+            const char* text = StringItem(root, "text");
+            Conversation::GetInstance().ReceiveAnswer(text, true);
+            if (text) dashboard::DashboardData::GetInstance().SetAiSummary(1, text);
+        } else if (state != nullptr && std::strcmp(state, "stop") == 0) {
+            AudioSession::GetInstance().EndPlayback();
+            playback_receiving_ = false;
+            accept_response_.store(false);
+            turn_in_flight_ = false;
+            response_started_ms_.store(0);
+            Conversation::GetInstance().SetState(TurnState::Done);
+            SaveCapsule();
+            PublishStatus("小智在线");
+        }
+    } else if (std::strcmp(type, "activation") == 0 || std::strcmp(type, "activate") == 0) {
+        PublishStatus("请绑定设备");
+        dashboard::DashboardData::GetInstance().SetAiSummary(0, "请完成小智设备绑定后开始对话");
+    } else if (std::strcmp(type, "error") == 0) {
+        InvalidateTransportLocked();
+        Conversation::GetInstance().SetState(TurnState::Error, "AI 服务暂时不可用，请重试");
+        PublishStatus("小智重连中");
+    } else if (std::strcmp(type, "mcp") == 0) {
+        const auto* payload = cJSON_GetObjectItemCaseSensitive(root, "payload");
+        if (cJSON_IsObject(payload)) {
+            char* json = cJSON_PrintUnformatted(payload);
+            if (json) {
+                if (std::strlen(json) <= 4096 && mcp_requests_.size() < 8) {
+                    std::lock_guard<std::mutex> session_lock(session_mutex_);
+                    mcp_requests_.push_back({epoch, session_id_, json});
+                    if (task_handle_) xTaskNotifyGive(task_handle_);
+                } else {
+                    // Do not acknowledge dropped work as successful. Reset
+                    // the transport so the server can rediscover/retry.
+                    InvalidateTransportLocked();
+                }
+                cJSON_free(json);
+            }
+        }
+    }
+
+    // The binding code is meant to be read off the panel by the owner, so it
+    // belongs on the AI card.  It is deliberately never written to the log,
+    // and the account token never appears anywhere outside NVS.
+    const cJSON* activation = cJSON_GetObjectItemCaseSensitive(root, "activation");
+    const char* activation_code = StringItem(root, "code");
+    if (activation_code == nullptr) {
+        activation_code = StringItem(activation, "code");
+    }
+    if (activation_code != nullptr && activation_code[0] != '\0') {
+        PublishStatus("请绑定设备");
+        char summary[80];
+        PrefixText(summary, sizeof(summary), "绑定码 ", activation_code);
+        dashboard::DashboardData::GetInstance().SetAiSummary(0, summary);
+    }
+    cJSON_Delete(root);
+}
+
+void Client::SendPendingMcp() {
+    McpRequest request;
+    {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        if (mcp_requests_.empty()) return;
+        request = std::move(mcp_requests_.front()); mcp_requests_.pop_front();
+        if (request.epoch != transport_epoch_ || !connected_.load()) return;
+        // Taking a current-session request is its execution boundary. Once
+        // accepted, persistence completes even if the connection drops.
+    }
+    const auto reply = reminders::Service::Instance().HandleMcp(request.payload, request.epoch);
+    if (reply.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(intent_mutex_);
+        if (request.epoch != transport_epoch_ || !connected_.load()) return;
+    }
+    const auto message = "{\"session_id\":\"" + JsonEscape(request.session) +
+                         "\",\"type\":\"mcp\",\"payload\":" + reply + "}";
+    if (!SendText(message)) HandleDisconnect(request.epoch);
+}
+
+void Client::Run() {
+    while (true) {
+        SavePendingCapsule();
+        if (restore_requested_.exchange(false) && !IsListening()) {
+            if (!LoadLastCapsule()) Conversation::GetInstance().SetState(TurnState::Idle, "还没有保存的胶囊");
+        }
+        const int64_t tick_ms = esp_timer_get_time() / 1000;
+        if (listen_requested_.load() && tick_ms - listen_started_ms_.load() >= 60000) {
+            (void)ListenStop();
+        }
+        if (response_started_ms_.load() > 0 && tick_ms - response_started_ms_.load() >= 45000) {
+            (void)Abort();
+            Conversation::GetInstance().SetState(TurnState::Error, "等待 AI 超时，原文仍保留，可重试");
+        }
+        if (!enabled_) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        // Binding comes first: an unbound device can open a socket but the
+        // server will not answer speech until the code is entered.  The HTTP
+        // stack assumes a live interface, so this waits for the dashboard's
+        // network probe like every other provider does.
+        if (NetworkReady()) {
+            ServiceActivation();
+        }
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (!connected_.load()) {
+            // Releasing the transport also stops capture and drops queued
+            // audio, so a reconnect never resumes with stale speech.
+            ReleaseTransport();
+            if (NetworkReady() &&
+                (!connect_attempted_ || now_ms - last_connect_attempt_ms_ >= kReconnectIntervalMs)) {
+                connect_attempted_ = true;
+                last_connect_attempt_ms_ = now_ms;
+                (void)ConnectOnce();
+            }
+        } else {
+            SendPendingAction();
+            SendPendingMcp();
+            uint32_t epoch;
+            {
+                std::lock_guard<std::mutex> lock(intent_mutex_);
+                epoch = transport_epoch_;
+            }
+            bool disconnected;
+            {
+                std::lock_guard<std::mutex> lock(ws_mutex_);
+                disconnected = websocket_ == nullptr || !websocket_->IsConnected();
+                if (!disconnected && connected_.load() && now_ms - last_ping_ms_.load() >= kPingIntervalMs) {
+                    websocket_->Ping();
+                    last_ping_ms_.store(now_ms);
+                }
+            }
+            if (disconnected) HandleDisconnect(epoch);
+        }
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    }
+}
+
+}  // namespace xiaozhi

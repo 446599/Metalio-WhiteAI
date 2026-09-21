@@ -3,6 +3,8 @@
 #include "display.h"
 #include "font/ai_ui_assets.h"
 #include "dashboard/dashboard_data.h"
+#include "reminders/alert_state.h"
+#include "icons/lucide_icons.h"
 
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -14,6 +16,14 @@
 
 class RawDisplay final : public Display {
 public:
+    enum class HardwareKey : uint8_t {
+        Previous,
+        Next,
+        Select,
+        Back,
+        Home,
+    };
+
     RawDisplay(esp_lcd_panel_handle_t panel, esp_lcd_panel_io_handle_t panel_io,
                esp_lcd_touch_handle_t touch, int width, int height);
     ~RawDisplay() override;
@@ -35,6 +45,18 @@ public:
     void ShowHomeScreen();
     void ShowProductHomeScreen();
     void ShowPoweredOffScreen();
+    // Route the board's physical keys into the product UI.  The return value
+    // lets the board keep its legacy volume behavior outside the product
+    // pages (for example while a diagnostic console is active).
+    bool HandleHardwareKey(HardwareKey key);
+    // Non-blocking with respect to display/TLS, callable from button callbacks.
+    bool HandleAiKey(bool down);
+    void ShowAiConversation();
+    void ShowReminderAlert(const reminders::AlertSnapshot& alert);
+    struct DeviceSnapshot { std::string app; int battery; bool charging, sleeping; };
+    DeviceSnapshot SystemSnapshot();
+    // Called only by the UI task, never from the network callback.
+    bool OpenSystemApp(const std::string& app, const std::string& date = "");
     static RawDisplay* Instance() { return instance_; }
 
 protected:
@@ -57,18 +79,31 @@ private:
         Settings,
         Confirmation,
         More,
+        Alarm,
+        Recorder,
+        Notes,
+        NoteDetail,
     };
 
     void DrawHomeScreenLocked();
     void DrawLegacyDashboardScreenLocked();
     void DrawTestConsoleLocked();
     void DrawProductScreenLocked();
-    void DrawProductStatusBarLocked(const char* section);
-    void DrawProductFooterLocked(const char* first, const char* second,
-                                 const char* third, const char* fourth);
-    void DrawProductButtonLocked(int x, int y, int width, int height,
-                                 const char* label, bool filled = false);
+    void DrawReminderAlertLocked();
+    bool HandleReminderTap(int x, int y);
+    void DrawProductStatusBarLocked();
+    void DrawProductControlRailLocked(const char* context);
+    void DrawProductLabelLocked(int x, int y, int width, const char* text, const ui_font_t& font);
+    void DrawProductChevronLocked(int x, int y);
+    void DrawProductHeadingLocked(const char* title, const char* index);
+    void DrawProductClockLocked(int x, int y, const char* text);
     void DrawProductHomeLocked();
+    void DrawProductAppIconLocked(int icon, int x, int y);
+    void DrawProductIconLocked(lucide::Id id, int x, int y, int size, bool black);
+    void DrawProductIconRowLocked(int y, lucide::Id icon, const char* title, const char* detail, bool selected);
+    void DrawProductNotesLocked(bool detail);
+    void DrawProductAlarmLocked();
+    void DrawProductRecorderLocked();
     void DrawProductAppsLocked();
     void DrawProductAiLocked(bool details);
     void DrawProductQuickNoteLocked();
@@ -84,7 +119,8 @@ private:
     void DrawTestPatternLocked();
     void DrawTestPatternVariantLocked(uint32_t step);
     void FlushLocked();
-    void FlushPartialLocked(int x, int y, int w, int h, bool incremental_du = false);
+    bool FlushBlackPulseLocked();
+    bool FlushPartialLocked(int x, int y, int w, int h, bool incremental_du = false);
     void FlushGray4Locked(const uint8_t* lsb, const uint8_t* msb,
                           bool invert_planes, bool swap_planes,
                           const uint8_t* lut, size_t lut_size);
@@ -157,6 +193,7 @@ private:
     // resident warm waveform cannot strand BUSY high or poison the diff base.
     bool panel_custom_waveform_active_ = false;
     uint32_t fast_refresh_count_ = 0;
+    size_t refresh_changed_bytes_ = 0;
     bool screen_test_mode_ = false;
     bool test_console_mode_ = true;
     uint8_t test_variant_ = 0;
@@ -186,6 +223,8 @@ private:
     char status_text_[48]{};
     char notification_text_[96]{};
     int64_t notification_deadline_ms_ = 0;
+    reminders::AlertSnapshot reminder_alert_;
+    int64_t reminder_visible_since_ms_ = 0;
     TaskHandle_t touch_task_ = nullptr;
     TaskHandle_t frame_dump_task_ = nullptr;
     TaskHandle_t animation_task_ = nullptr;
@@ -198,9 +237,28 @@ private:
     int touch_last_x_ = 0;
     int touch_last_y_ = 0;
     int64_t touch_start_ms_ = 0;
-    bool ai_listening_ = false;
     ProductPage product_page_ = ProductPage::Home;
+    ProductPage app_parent_ = ProductPage::Home;
+    int navigation_index_ = 0;
+    std::atomic_bool ai_key_down_{false};
+    int ai_text_page_ = 0;
+    int ai_page_count_ = 1;
+    bool ai_show_transcript_ = false;
+    bool voice_note_mode_ = false;
+    uint32_t ai_drawn_turn_ = 0;
+    uint32_t last_conversation_revision_ = 0;
     uint8_t quick_note_state_ = 0;
     uint8_t reader_page_ = 0;
+    int calendar_month_ = 0;
+    int calendar_day_ = 0;
+    int calendar_events_page_ = 0;
+    int alarm_page_ = 0;
+    int alarm_pages_ = 1;
+    uint32_t alarm_ids_[4]{};
+    bool alarm_enabled_[4]{};
+    uint32_t last_recorder_revision_ = 0;
+    uint32_t last_notes_revision_ = 0;
+    int notes_page_ = 0, notes_pages_ = 1, note_text_page_ = 0, note_text_pages_ = 1;
+    uint32_t note_id_ = 0, note_ids_[6]{};
     static RawDisplay* instance_;
 };

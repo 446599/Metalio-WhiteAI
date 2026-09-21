@@ -1,0 +1,17 @@
+{
+  "font": "HarmonyOS_Sans_SC.ttf",
+  "fallback": "NotoSansCJKsc-Regular.otf",
+  "fallback_glyphs": 15740,
+  "source_sha256": "8978e05044e7089ad6a9de38c505c8148305607983487435a916d2610700a7ca",
+  "sha256": "00fec4502eef536f2f7581b15269bf7b06f6440cca97791118bb70868e2ca3cb",
+  "bytes": 4328412,
+  "glyphs": 45248,
+  "size": 26,
+  "line_height": 32,
+  "baseline": 25,
+  "bpp": 1,
+  "basic_cjk": 20992,
+  "extension_a": 6582,
+  "supplementary": 2717,
+  "fallback_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+}

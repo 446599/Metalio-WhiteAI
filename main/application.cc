@@ -1,11 +1,15 @@
 #include "application.h"
+#include "notes/note_service.h"
+#include "system/device_control.h"
 
 #include "board.h"
 #include "display.h"
 #include "display/raw_display.h"
 #include "dashboard/dashboard_service.h"
+#include "dual_network_board.h"
 #include "hal/hal.h"
 #include "xiaozhi/xiaozhi_client.h"
+#include "reminders/reminder_service.h"
 
 #include <esp_log.h>
 #include <esp_system.h>
@@ -25,11 +29,7 @@ void OnClockTimer(void* /*arg*/) {
     if (s_app_for_timer == nullptr) {
         return;
     }
-    s_app_for_timer->Schedule([]() {
-        if (auto* display = Board::GetInstance().GetDisplay()) {
-            display->UpdateStatusBar(false);
-        }
-    });
+    s_app_for_timer->RequestStatusUpdate();
 }
 
 }  // namespace
@@ -87,10 +87,18 @@ void Application::Start() {
         display->UpdateStatusBar(true);
     }
 
+    // A provisioning request recorded by the serial command has to be honoured
+    // before any network provider starts; the config AP path never returns.
+    if (auto* dual = dynamic_cast<DualNetworkBoard*>(&Board::GetInstance())) {
+        dual->StartProvisioningIfRequested();
+    }
+
     // Providers run on their own bounded tasks.  The display remains usable
     // offline while weather, quota and Xiaozhi refresh in the background.
     if (event_task_result == pdPASS) {
         dashboard::DashboardService::GetInstance().Start();
+        notes::Start();
+        reminders::Service::Instance().Start();
         xiaozhi::Client::GetInstance().Start();
     }
 }
@@ -98,7 +106,8 @@ void Application::Start() {
 void Application::MainEventLoop() {
     while (true) {
         EventBits_t bits =
-            xEventGroupWaitBits(event_group_, MAIN_EVENT_SCHEDULE, pdTRUE, pdFALSE, portMAX_DELAY);
+            xEventGroupWaitBits(event_group_, MAIN_EVENT_SCHEDULE | MAIN_EVENT_CLOCK_TICK |
+                               MAIN_EVENT_UI | MAIN_EVENT_AI_FOCUS, pdTRUE, pdFALSE, portMAX_DELAY);
         if (bits & MAIN_EVENT_SCHEDULE) {
             std::deque<std::function<void()>> tasks;
             {
@@ -109,7 +118,36 @@ void Application::MainEventLoop() {
                 task();
             }
         }
+        if (bits & MAIN_EVENT_UI) {
+            std::function<void()> task;
+            // A bounded batch keeps provider/status work from starvation.
+            for (size_t i = 0; i < UiWorkQueue::kCapacity && ui_tasks_.Pop(task); ++i) task();
+        }
+        if (bits & MAIN_EVENT_AI_FOCUS) {
+            if (auto* raw = RawDisplay::Instance()) raw->ShowAiConversation();
+        }
+        if (bits & MAIN_EVENT_CLOCK_TICK) {
+            device::Control::Instance().Tick();
+            if (auto* display = Board::GetInstance().GetDisplay()) {
+                display->UpdateStatusBar(force_status_update_.exchange(false));
+            }
+        }
     }
+}
+
+bool Application::ScheduleUi(std::function<void()> callback) {
+    const bool accepted = ui_tasks_.Push(std::move(callback));
+    if (accepted) xEventGroupSetBits(event_group_, MAIN_EVENT_UI);
+    return accepted;
+}
+
+void Application::RequestStatusUpdate(bool force) {
+    if (force) force_status_update_.store(true);
+    xEventGroupSetBits(event_group_, MAIN_EVENT_CLOCK_TICK);
+}
+
+void Application::RequestAiFocus() {
+    xEventGroupSetBits(event_group_, MAIN_EVENT_AI_FOCUS);
 }
 
 void Application::Schedule(std::function<void()> callback) {

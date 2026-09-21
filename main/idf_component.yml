@@ -9,6 +9,9 @@ dependencies:
   espressif/zlib: '*'
   # ESP-IDF 6 moved MQTT out of the IDF tree; esp-ml307 still includes mqtt.h.
   espressif/mqtt: ^1.0.0
+  # Opus encoder/decoder (esp_opus_enc / esp_opus_dec) for the Xiaozhi audio
+  # session; only the OPUS objects are pulled in from the prebuilt library.
+  espressif/esp_audio_codec: ^2.6.2
 
   espressif/esp_tinyusb:
     version: ^2.0.0

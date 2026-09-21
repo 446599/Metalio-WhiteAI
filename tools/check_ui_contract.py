@@ -2,8 +2,9 @@
 """Check the portrait UI geometry contract without building firmware.
 
 This host-side check catches drift in the 480x800 logical coordinate system,
-home-page touch hit boxes, the reserved product-page footer, and legacy test
-buttons. It does not claim that pixels were observed on an SSD1677 panel.
+product-page touch hit boxes, safe areas, and diagnostic test buttons.
+Navigation uses the cover touch strip; the on-screen rail is passive. It does not claim that pixels were observed on an SSD1677
+panel.
 """
 
 from __future__ import annotations
@@ -90,16 +91,55 @@ def main() -> int:
                    for box in home.values())
 
     inset = _constant(source, "kUiInset")
-    footer_w = _constant(source, "kUiFooterButtonWidth")
-    footer_h = _constant(source, "kUiFooterButtonHeight")
-    gap = _constant(source, "kUiFooterGap")
-    footer_x = _array(source, "kUiFooterX")
-    footer_y = _array(source, "kUiFooterRowY")
-    assert footer_x == [inset, inset + footer_w + gap]
-    assert footer_y == [_constant(source, "kUiFooterY"), _constant(source, "kUiFooterY") + footer_h + gap]
-    footer_boxes = [(x, y, footer_w, footer_h) for y in footer_y for x in footer_x]
-    assert all(_inside(box, width, height) for box in footer_boxes)
-    assert footer_boxes[-1][1] + footer_h == 784  # 16 px bottom safe area
+    product_width = _constant(source, "kUiContentWidth")
+    tile_x = _array(source, "kUiHomeX")
+    tile_y = _array(source, "kUiHomeY")
+    tile_w = _constant(source, "kUiHomeW")
+    tile_h = _constant(source, "kUiHomeH")
+    nav_y = _constant(source, "kUiHomeNavY")
+    nav_h = _constant(source, "kUiHomeNavH")
+    tiles = [(x,y,tile_w,tile_h) for x in tile_x for y in tile_y]
+    nav = [(x,nav_y,tile_w,nav_h) for x in tile_x]
+    assert inset == 32 and product_width == 416
+    assert len(tiles) == 4 and len(nav) == 2
+    assert all(_inside(box,width,height) for box in tiles + nav)
+    assert tile_x[1] - tile_x[0] - tile_w >= 8
+    assert tile_y[1] - tile_y[0] - tile_h >= 8
+    assert tile_y[-1] + tile_h + 16 <= nav_y
+    assert min(tile_w,tile_h,nav_h) >= 48
+    rail_y = _constant(source, "kUiRailY")
+    assert nav_y + nav_h < rail_y
+    assert rail_y + 10 + 24 <= height - 12
+    body_y = _constant(source, "kUiBodyY")
+    for count, pitch_name, height_name in [(7, "kUiRowPitch", "kUiRowHeight"),
+                                          (3, "kUiCardPitch", "kUiCardHeight")]:
+        pitch = _constant(source, pitch_name)
+        row_height = _constant(source, height_name)
+        assert row_height >= 44 and pitch - row_height >= 8
+        assert body_y + (count - 1) * pitch + row_height < rail_y
+    ai_x = _array(source, "kAiActionX")
+    ai_y = _array(source, "kAiActionY")
+    ai_w = _constant(source, "kAiActionW")
+    ai_h = _constant(source, "kAiActionH")
+    assert ai_w >= 44 and ai_h >= 44
+    assert all(_inside((x,y,ai_w,ai_h),width,height) for x in ai_x for y in ai_y)
+    assert ai_x[1] - (ai_x[0] + ai_w) >= 8
+    assert ai_y[1] - (ai_y[0] + ai_h) >= 8
+    assert ai_y[-1] + ai_h < rail_y
+    # Rendering and routing must both refer to the same named rectangles.
+    tap_source = source[source.index("void RawDisplay::HandleHomeTap("):
+                        source.index("bool RawDisplay::HandleHardwareKey(")]
+    assert "in_rect(kUiHomeX[i % 2], kUiHomeY[i / 2], kUiHomeW, kUiHomeH)" in tap_source
+    assert "in_rect(kUiHomeX[i], kUiHomeNavY, kUiHomeW, kUiHomeNavH)" in tap_source
+    for box in [(344,160+row*112,104,48) for row in range(4)] + [(32,496,416,64),(32,584,416,64),(32,672,416,64)]:
+        assert _inside(box,width,height) and min(box[2:]) >= 48
+    home_render = source[source.index("void RawDisplay::DrawProductHomeLocked"):source.index("void RawDisplay::DrawProductAppIconLocked")]
+    assert "FormatQuotaStatus" not in home_render and "FormatWeatherStatus" not in home_render
+    apps_render = source[source.index("void RawDisplay::DrawProductAppsLocked"):source.index("void RawDisplay::DrawProductAiLocked")]
+    assert '"闹钟", "日历", "录音", "小智"' in apps_render
+    assert '"设置"' not in apps_render and '"更多"' not in apps_render
+    assert "ProductRowAt(x, y," in tap_source
+    assert "footer_index" not in tap_source
 
     test_x = _constant(source, "kTestButtonX")
     test_w = _constant(source, "kTestButtonW")
@@ -110,7 +150,8 @@ def main() -> int:
 
     print("UI contract OK")
     print(f"logical={width}x{height} home_hit={home}")
-    print(f"product_footer={footer_boxes} test_console={[(test_x, y, test_w, test_h) for y in test_y]}")
+    print(f"home_tiles={tiles} home_navigation={nav} passive_rail_y={rail_y}")
+    print(f"cover_touch_y=900 test_console={[(test_x, y, test_w, test_h) for y in test_y]}")
     return 0
 
 

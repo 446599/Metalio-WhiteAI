@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/lucide-icons/lucide",
+  "commit": "ba6751ac45d379f6359d75ef2228cff6ba96c122",
+  "sha256": {
+    "LICENSE": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
+    "alarm-clock.svg": "28b99c01c718b004fbeb35afd06a7deb5d854ae81d4dc31fe043c8074353d45d",
+    "calendar-days.svg": "9330eb8d7c4989e97b6361314abbf02953243c602874725c9e58ceca00da3bd7",
+    "mic.svg": "9b940cd735d1ffa270ba670c4e677d9a09400f3fa81d6b3f405b12a3b67a59a8",
+    "bot.svg": "e46fe72fc5b33d7a17b0112df85da9ded851860312e8353f4fe23d87a4ce77f5",
+    "layout-grid.svg": "b8903f61d09b1d75e55c71158277d26570962f69c2099446a251871e0a2d6678",
+    "settings-2.svg": "06d06c191bd7eb28afaf9d40acb5c49ef69448fdeda91801d9823d7c440a4e10",
+    "notebook-pen.svg": "56705c35e839977bd6f133d7ca4e9c93a6eea563c89e4be125efd0a32e1fa041",
+    "book-open.svg": "9b9bed0ff057283d5c5c5a1c71f8d3e927db26a56639603a92fdf7b25961510e",
+    "sticky-note.svg": "a1370d25eb7dc9c42ca4a69adb82818fec950f1d441f88fd3ea84cd6ac10f875",
+    "timer.svg": "6771297be65225d462c930865b6f9ee1617aa453885be4c8116a7512a77ac2b6",
+    "battery.svg": "bd0e96da226beca6d150ee25f04bc5ca8466c1ed91e806c2179723e173af2282",
+    "battery-low.svg": "a158265a07d3ea60134de7ca88c023ebbe35d9af9c724c410ed251f248987a52",
+    "battery-medium.svg": "f8a79b837f96c801ffc394d1d154c5a792823e3bb506bb98a4379b0647067e0a",
+    "battery-full.svg": "9ef66bd46e676bbcf1e8befca8e904b93be9214abccea4f8a4d20432a0c5ccf8",
+    "battery-charging.svg": "6a95bf102235d7070121bb8eb21a4836fa7ea9f0dbe8327eadbdf94253acdcbd",
+    "chevron-right.svg": "2758143d7b2434e4aa7307dfd34405c87909ff4052f21b5f3f40d45224b4f19b",
+    "volume-2.svg": "fb404f9c128a0579de67b399177631e5edb3502fdc247ceb30e8b15754b46071",
+    "wifi.svg": "5c4c795d014fa95d1e1038362df44a0f0f32ded9cb08c833ae72419ebadc9a91",
+    "refresh-cw.svg": "2e10dd403c85a24f163d59fc6151aa21147fe9402e1305dfc8979208caee8944",
+    "info.svg": "bc977a64eb96f3e9c1041ffd09a3fceb70e3e65c02b571f76064062ed31f3cb9",
+    "monitor.svg": "d1a443233345724859de8e4fb48968ba91e885e12ddbd710701548bd91b39428"
+  }
+}
