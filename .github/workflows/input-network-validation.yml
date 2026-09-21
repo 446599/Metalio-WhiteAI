@@ -6,46 +6,146 @@ on:
 permissions:
   contents: read
 jobs:
-  host:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Apply verified implementation patch
+        shell: python
+        run: |
+          import base64,gzip,hashlib,pathlib,subprocess
+          p=[f.read_text().strip() for f in sorted(pathlib.Path('.ci').glob('input-network-payload-*.b64'))]
+          assert len(p)==5
+          p[0]=p[0].replace('fa1f1+52','fa1+52',1)
+          p[3]=p[3].replace('P76G4/a1d7p61','P76G4/a1/6f7p61',1).replace('Wtw3LeGOZOyqasp','Wtw3LeGOYqasp',1)
+          raw=gzip.decompress(base64.b64decode(''.join(p),validate=True))
+          assert hashlib.sha256(raw).hexdigest()=='a2d54d0d49c0f11473f33c425ed7591ce75bec1eba692f96ccaa74546ebfd5aa'
+          pathlib.Path('/tmp/input-network.patch').write_bytes(raw)
+          subprocess.run(['git','apply','--index','/tmp/input-network.patch'],check=True)
+          if pathlib.Path('.ci/input-network-fixes.py').exists():
+            subprocess.run(['python3','.ci/input-network-fixes.py'],check=True)
+      - uses: actions/checkout@v4
+        with:
+          repository: mozillazg/pinyin-data
+          ref: 923b108dc5d45dee061324c011b478fb649f8b73
+          path: _pinyin_src
+          persist-credentials: false
+      - name: Generate bounded offline dictionary and source overlay
+        shell: python
+        run: |
+          import pathlib,shutil,subprocess,zipfile
+          subprocess.run(['python3','tools/build_pinyin_dictionary.py','_pinyin_src/pinyin.txt','--out','main/input/pinyin_dictionary.inc'],check=True)
+          shutil.copyfile('_pinyin_src/LICENSE','main/input/PINYIN_LICENSE')
+          subprocess.run(['git','add','main','components','tools','docs'],check=True)
+          files=subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()
+          assert files and all(f.startswith(('main/','components/','tools/','docs/')) for f in files)
+          pathlib.Path('overlay-files.txt').write_text('\n'.join(files)+'\n')
+          with zipfile.ZipFile('input-network-overlay.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for f in files: z.write(f,f)
+          print('Source overlay:',len(files),'files')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: input-network-overlay
+          path: |
+            input-network-overlay.zip
+            overlay-files.txt
+          retention-days: 2
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: input-network-transfer-debug
+          path: .ci/input-network-payload-*.b64
+          include-hidden-files: true
+          retention-days: 1
+  host:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: input-network-overlay
+      - run: unzip -o input-network-overlay.zip
       - uses: actions/checkout@v4
         with:
           repository: DaveGamble/cJSON
           ref: v1.7.19
           path: managed_components/espressif__cjson/cJSON
           persist-credentials: false
-      - name: Baseline checks
+      - run: python3 -m pip install Pillow
+      - name: Input and existing behavior regressions
         run: |
-          python3 tools/check_ui_contract.py
-          python3 tools/check_ai_contract.py
-          python3 tools/check_dashboard_contract.py
-          python3 tools/check_reminders_contract.py
-          python3 tools/check_system_tools.py
-          python3 tools/check_memory_contract.py
-      - name: Prepare source-only inspection bundle
+          mkdir -p validation
+          failed=0
+          for test in tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
+            python3 "$test" > "validation/$(basename "$test").log" 2>&1 || failed=1
+            tail -n 20 "validation/$(basename "$test").log"
+          done
+          exit "$failed"
+      - name: Actual firmware rendering and input routing
         if: always()
-        shell: python
-        run: |
-          import pathlib, zipfile
-          root=pathlib.Path('.')
-          with zipfile.ZipFile('input-network-sources.zip','w',zipfile.ZIP_DEFLATED) as z:
-            for folder in ('main','tools','docs','components'):
-              for p in (root/folder).rglob('*'):
-                if not p.is_file() or 'font' in str(p).lower() or p.suffix not in ('.cc','.c','.h','.hpp','.py','.txt','.md','.yml'):
-                  continue
-                if p.stat().st_size>400000:
-                  continue
-                z.write(p,p.as_posix())
-            for name in ('AGENTS.md','CMakeLists.txt','sdkconfig','sdkconfig.defaults','dependencies.lock'):
-              z.write(name,name)
+        run: python3 tools/render_ui_preview.py --out build/ui-input-preview > validation/render.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: input-network-sources
-          path: input-network-sources.zip
-          retention-days: 1
+          name: input-network-host-validation
+          path: |
+            validation/
+            build/ui-input-preview/**/*.png
+          retention-days: 3
+  firmware:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: input-network-overlay
+      - name: Restore source overlay
+        shell: bash
+        run: python3 -m zipfile -e input-network-overlay.zip .
+      - name: Compile complete ESP32-S3 firmware
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          idf.py build 2>&1 | tee firmware-build.log
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: input-network-build-log
+          path: |
+            firmware-build.log
+            build/delivery_manifest.json
+          retention-days: 3
+  publish:
+    needs: [host,firmware]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/input-network
+      - name: Check branch has not moved
+        run: test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+      - uses: actions/download-artifact@v4
+        with:
+          name: input-network-overlay
+      - name: Commit validated source to feature branch
+        shell: bash
+        run: |
+          unzip -o input-network-overlay.zip
+          git add --pathspec-from-file=overlay-files.txt
+          git -c user.name='WhiteAI validation' -c user.email='116695909+446599@users.noreply.github.com' commit -m 'feat(input): add offline pinyin, local Wi-Fi setup and note editing' -m 'Host regressions and full ESP-IDF 6.0.1 target build passed. Physical input, radio and display behavior still need board validation.'
+          git push origin HEAD:codex/input-network
