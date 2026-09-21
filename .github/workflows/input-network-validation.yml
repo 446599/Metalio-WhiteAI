@@ -1,0 +1,51 @@
+name: Input and network validation
+on:
+  push:
+    branches: [codex/input-network]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: v1.7.19
+          path: managed_components/espressif__cjson/cJSON
+          persist-credentials: false
+      - name: Baseline checks
+        run: |
+          python3 tools/check_ui_contract.py
+          python3 tools/check_ai_contract.py
+          python3 tools/check_dashboard_contract.py
+          python3 tools/check_reminders_contract.py
+          python3 tools/check_system_tools.py
+          python3 tools/check_memory_contract.py
+      - name: Prepare source-only inspection bundle
+        if: always()
+        shell: python
+        run: |
+          import pathlib, zipfile
+          root=pathlib.Path('.')
+          with zipfile.ZipFile('input-network-sources.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for folder in ('main','tools','docs','components'):
+              for p in (root/folder).rglob('*'):
+                if not p.is_file() or 'font' in str(p).lower() or p.suffix not in ('.cc','.c','.h','.hpp','.py','.txt','.md','.yml'):
+                  continue
+                if p.stat().st_size>400000:
+                  continue
+                z.write(p,p.as_posix())
+            for name in ('AGENTS.md','CMakeLists.txt','sdkconfig','sdkconfig.defaults','dependencies.lock'):
+              z.write(name,name)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: input-network-sources
+          path: input-network-sources.zip
+          retention-days: 1
