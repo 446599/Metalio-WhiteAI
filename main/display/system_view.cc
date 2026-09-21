@@ -18,11 +18,13 @@ RawDisplay::DeviceSnapshot RawDisplay::SystemSnapshot() {
         case ProductPage::TodayList: name="calendar";break;
         case ProductPage::Recorder: name="recorder";break;
         case ProductPage::AiResult: case ProductPage::AiSteps: name=voice_note_mode_ ? "voice_note" : "assistant";break;
-        case ProductPage::Notes: case ProductPage::NoteDetail: name="notes";break;
+        case ProductPage::NoteCompose: case ProductPage::Notes: case ProductPage::NoteDetail: name="notes";break;
         case ProductPage::QuickNote: name="capsules";break;
         case ProductPage::Reader: name="reader";break;
         case ProductPage::Apps: name="apps";break;
         case ProductPage::More: name="device";break;
+        case ProductPage::WifiList: case ProductPage::WifiCredentials: name="wifi";break;
+        case ProductPage::TextEntry: name="text_input";break;
         case ProductPage::Workbench: name="status";break;
         case ProductPage::Settings: name="info";break;
         default: break;
@@ -51,7 +53,7 @@ bool RawDisplay::OpenSystemApp(const std::string& app,const std::string& date) {
     bool wake=false;
     {
         DisplayLockGuard lock(this);
-        if (!portrait_fb_ || reminder_alert_.active) return false;
+        if (!portrait_fb_ || reminder_alert_.active || form_active_.load() || discard_pending_) return false;
         if (product_page_==ProductPage::Recorder && entry->page!=product_page_) xiaozhi::AudioSession::GetInstance().StopRecorder();
         screen_test_mode_=false;test_console_mode_=false;wake=power_save_;power_save_=false;
         product_page_=entry->page;app_parent_=ProductPage::Apps;navigation_index_=0;
@@ -68,10 +70,12 @@ bool RawDisplay::OpenSystemApp(const std::string& app,const std::string& date) {
 void RawDisplay::DrawProductNotesLocked(bool detail) {
     std::memset(portrait_fb_,0xff,portrait_size_);
     DrawProductStatusBarLocked();
-    const auto items=notes::DeviceStore().List();
+    const auto items=detail ? notes::DeviceStore().List() : notes::DeviceStore().Search(notes_query_,"");
     if (detail) {
         const auto it=std::find_if(items.begin(),items.end(),[this](const auto& item){return item.id==note_id_;});
-        DrawProductHeadingLocked(it==items.end() ? "笔记已删除" : it->title.c_str(),"笔记");
+        DrawProductHeadingLocked("笔记详情","");
+        DrawProductLabelLocked(32,120,416,it==items.end() ? "笔记已删除" : it->title.c_str(),ui_font_small);
+        if(it!=items.end()) {StrokeRoundRect(344,72,104,48,12,1);DrawTextCentered(344,72,104,48,"编辑",ui_font_small);}
         const std::string body=it==items.end() ? "返回笔记目录查看其他内容。" : notes::DisplayBody(*it);
         const auto text_page=raw_font::Paginate(body,416,
             static_cast<size_t>(std::max(0,note_text_page_)),12,
@@ -93,7 +97,7 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
     notes_page_=std::clamp(notes_page_,0,notes_pages_-1);
     std::fill(std::begin(note_ids_),std::end(note_ids_),0);
     char count[24];std::snprintf(count,sizeof(count),"%u / 8",static_cast<unsigned>(items.size()));
-    DrawProductHeadingLocked("AI 笔记",count);
+    DrawProductHeadingLocked(notes_query_.empty() ? "AI 笔记" : "搜索结果",count);
     for (int row=0;row<6 && notes_page_*6+row<static_cast<int>(items.size());++row) {
         const auto& note=items[notes_page_*6+row];note_ids_[row]=note.id;
         std::string stamp=note.updated ? reminders::LocalTime(note.updated).substr(5,11) : "时间未同步";
@@ -103,13 +107,14 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
     }
     if (items.empty()) {
         DrawProductIconLocked(lucide::Id::NotebookPen,220,216,40,true);
-        DrawTextCentered(32,300,416,48,notes::DeviceStore().Ready() ? "让小智帮你记下来" : "请检查 SD 卡",ui_font_body);
-        DrawTextCentered(32,364,416,40,"试着说：保存一份购物清单",ui_font_small);
+        DrawTextCentered(32,300,416,48,notes::DeviceStore().Ready() ? (notes_query_.empty() ? "点击新建，或让小智记录" : "没有匹配的笔记") : "请检查 SD 卡",ui_font_body);
+        DrawTextCentered(32,364,416,40,notes_query_.empty() ? "支持离线拼音输入" : "搜索中清空文字可显示全部",ui_font_small);
     }
-    for (int i=0;i<2;++i) {
-        StrokeRoundRect((i ? 248 : 32),672,200,48,12,1);
-        DrawTextCentered((i ? 248 : 32),672,200,48,i ? "下一页" : "语音新建",ui_font_small);
+    const char* controls[]={"新建", "搜索", "下一页"};
+    const int xs[]={32,174,316};
+    for(int i=0;i<3;++i) {
+        StrokeRoundRect(xs[i],672,132,48,12,1);
+        DrawTextCentered(xs[i],672,132,48,controls[i],ui_font_small);
     }
-    DrawProductControlRailLocked("保存在 SD 卡 / 按住 AI 键说话");
+    DrawProductControlRailLocked("本地输入 / 按住 AI 键语音记录");
 }
-

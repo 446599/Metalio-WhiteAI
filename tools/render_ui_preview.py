@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from preview_input_support import HEADERS, FIELDS, METHODS, EXERCISE
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'main/display/raw_display.cc'
@@ -42,7 +43,7 @@ def host_source(source: str) -> str:
     product_names = re.findall(r'^void RawDisplay::(DrawProduct\w+)\(', source, re.M)
     methods = ['SetPixel', 'FillRect', 'StrokeRect', 'FillRoundRect', 'StrokeRoundRect',
                'FillCircle', 'StrokeCircle', 'DrawTextInk', 'DrawText', 'TextWidth',
-               'FitText', 'FitTextLines', 'DrawTextCentered'] + product_names
+               'FitText', 'FitTextLines', 'DrawTextCentered'] + product_names + METHODS
     bodies = [function(source, 'RawDisplay::' + name) for name in methods]
     bodies.append(function((ROOT/'main/display/reminder_view.cc').read_text(), 'RawDisplay::DrawReminderAlertLocked'))
     declarations = [body[:body.index('{')].replace('RawDisplay::', '').strip() + ';' for body in bodies]
@@ -115,10 +116,10 @@ time_t preview_epoch = 0;
 time_t preview_time(time_t* out) { if (out) *out = preview_epoch; return preview_epoch; }
 int64_t esp_timer_get_time() { return 1000000; }
 #define time(out) preview_time(out)
-''' + constants + '\n' + free_functions + '''
+''' + HEADERS + constants + '\n' + free_functions + '''
 class RawDisplay {
 public:
-''' + enums + '\n' + '\n'.join(declarations) + '''
+''' + enums + '\n' + FIELDS + '\n'.join(declarations) + '''
     uint8_t pixels[480 * 800 / 8]{};
     uint8_t* portrait_fb_ = pixels;
     size_t portrait_size_ = sizeof(pixels);
@@ -342,6 +343,7 @@ int main(int argc, char** argv) {
     display.reminder_alert_.count = 3;
     display.reminder_alert_.message = "已自动静音，请处理提醒";
     save("alarm-silent");
+''' + EXERCISE + '''
     return preview_errors ? 1 : 0;
 }
 '''
@@ -360,7 +362,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix='miaoink-ui-') as temporary:
         host = Path(temporary) / 'preview.cc'
         executable = Path(temporary) / 'preview'
-        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()))
+        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()))
         cjson = ROOT / "managed_components/espressif__cjson/cJSON"
         subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson), "-o", str(Path(temporary)/"cjson.o")], check=True)
         subprocess.run([compiler, '-std=c++17', '-O1', '-DFONTPACK_HOST_TEST', '-x', 'c++', '-I', str(ROOT / 'main'),
@@ -368,7 +370,7 @@ def main() -> None:
                         str(ROOT / 'main/dashboard/dashboard_data.cc'),
                         str(ROOT / 'main/display/font/raw_font.cc'),
                         str(ROOT / 'main/display/font/font_loader.c'),
-                        str(ROOT / 'main/xiaozhi/conversation.cc'), str(ROOT / 'main/notes/note_store.cc'), str(ROOT / 'main/reminders/reminder_store.cc'), '-x', 'none', str(Path(temporary)/'cjson.o'), '-o', str(executable)], check=True)
+                        str(ROOT / 'main/input/text_input.cc'), str(ROOT / 'main/network/setup_model.cc'), str(ROOT / 'main/xiaozhi/conversation.cc'), str(ROOT / 'main/notes/note_store.cc'), str(ROOT / 'main/reminders/reminder_store.cc'), '-x', 'none', str(Path(temporary)/'cjson.o'), '-o', str(executable)], check=True)
         failures = []
         for scenario in scenarios:
             out = args.out.resolve() / scenario

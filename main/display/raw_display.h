@@ -13,6 +13,9 @@
 #include <freertos/task.h>
 
 #include <atomic>
+#include "input/text_input.h"
+#include "network/setup_model.h"
+#include "notes/note_store.h"
 
 class RawDisplay final : public Display {
 public:
@@ -83,8 +86,25 @@ private:
         Recorder,
         Notes,
         NoteDetail,
+        WifiList,
+        WifiCredentials,
+        TextEntry,
+        NoteCompose,
     };
 
+    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch };
+    void DrawProductWifiLocked(bool credentials);
+    void DrawProductTextEntryLocked();
+    void DrawProductNoteComposeLocked();
+    void DrawProductDiscardLocked();
+    bool HandleSetupTap(int x, int y);
+    bool HandleSetupKey(HardwareKey key);
+    void OpenEditorLocked(EditTarget target);
+    void OpenNoteEditorLocked(bool existing);
+    void FinishEditorLocked(bool accept);
+    void LeaveFormLocked(ProductPage destination);
+    void ClearFormLocked();
+    void AdvanceFormsLocked();
     void DrawHomeScreenLocked();
     void DrawLegacyDashboardScreenLocked();
     void DrawTestConsoleLocked();
@@ -260,5 +280,16 @@ private:
     uint32_t last_notes_revision_ = 0;
     int notes_page_ = 0, notes_pages_ = 1, note_text_page_ = 0, note_text_pages_ = 1;
     uint32_t note_id_ = 0, note_ids_[6]{};
+    input::Editor editor_;
+    EditTarget edit_target_ = EditTarget::None;
+    ProductPage editor_parent_ = ProductPage::WifiCredentials, discard_destination_ = ProductPage::Home;
+    std::atomic_bool form_active_{false};
+    bool discard_pending_ = false, draft_dirty_ = false, password_reveal_ = false, symbols_second_ = false;
+    network::AccessPoint selected_ap_;
+    std::string wifi_password_, form_message_, notes_query_;
+    notes::Note draft_note_;
+    int wifi_page_ = 0;
+    bool wifi_manual_ = false, wifi_switch_confirm_ = false;
+    uint32_t last_wifi_revision_ = 0, last_writer_revision_ = 0, note_save_operation_ = 0;
     static RawDisplay* instance_;
 };
