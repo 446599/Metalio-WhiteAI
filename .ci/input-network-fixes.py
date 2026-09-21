@@ -48,3 +48,18 @@ replace('components/esp-wifi-connect/wifi_station.cc', '''    } else if (event_i
         }
         this_->HandleScanResult();''')
 replace('tools/preview_input_support.py','#include "notes/note_writer.h"','#include "notes/note_writer.h"\n#include <climits>')
+replace('main/display/raw_display.cc', '''                                case ProductPage::NoteDetail: page_name = "note_detail"; break;''','''                                case ProductPage::NoteDetail: page_name = "note_detail"; break;
+                                case ProductPage::WifiList: page_name = "wifi_list"; break;
+                                case ProductPage::WifiCredentials: page_name = "wifi_credentials"; break;
+                                case ProductPage::TextEntry: page_name = "text_input"; break;
+                                case ProductPage::NoteCompose: page_name = "note_compose"; break;''')
+replace('main/display/raw_display.cc', '''    const bool notice = notification_text_[0] != '\\0' &&''','''    const bool notice = !form_active_.load() && notification_text_[0] != '\\0' &&''')
+replace('components/esp-wifi-connect/wifi_station.cc', '''    if (this_->manual_setup_.load()) {
+        wifi_ap_record_t ap{};
+        if (!this_->manual_attempting_.load() || esp_wifi_sta_get_ap_info(&ap) != ESP_OK ||
+            this_->ssid_ != std::string(reinterpret_cast<char*>(ap.ssid), strnlen(reinterpret_cast<char*>(ap.ssid),32)) ||
+            event->ip_info.ip.addr == 0) return;
+    }''','''    wifi_ap_record_t ap{};
+    if(esp_wifi_sta_get_ap_info(&ap)!=ESP_OK || event->ip_info.ip.addr==0 ||
+       this_->ssid_!=std::string(reinterpret_cast<char*>(ap.ssid),strnlen(reinterpret_cast<char*>(ap.ssid),32))) return;
+    if(this_->manual_setup_.load() && !this_->manual_attempting_.load()) return;''')
