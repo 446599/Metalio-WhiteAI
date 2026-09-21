@@ -3,6 +3,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
+from host_cjson import cjson_flags
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST = r'''
@@ -184,12 +185,9 @@ int main() {
 with tempfile.TemporaryDirectory(prefix="miaoink-reminders-") as directory:
     path = Path(directory)
     (path / "test.cc").write_text(TEST)
-    cjson = ROOT / "managed_components/espressif__cjson/cJSON"
-    subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson),
-                    "-o", str(path / "cjson.o")], check=True)
     subprocess.run(["c++", "-std=c++17", "-O1", "-Wall", "-Wextra", "-fsanitize=undefined",
-                    "-I", str(ROOT / "main"), "-I", str(cjson), str(path / "test.cc"),
+                    "-I", str(ROOT / "main"), str(path / "test.cc"),
                     str(ROOT / "main/reminders/reminder_store.cc"),
-                    str(ROOT / "main/xiaozhi/mcp_server.cc"), str(ROOT / "main/xiaozhi/system_tools.cc"), str(ROOT / "main/notes/note_store.cc"), str(path / "cjson.o"),
+                    str(ROOT / "main/xiaozhi/mcp_server.cc"), str(ROOT / "main/xiaozhi/system_tools.cc"), str(ROOT / "main/notes/note_store.cc"), str(ROOT / "main/xiaozhi/conversation.cc"), str(ROOT / "main/xiaozhi/memory_tools.cc"), *cjson_flags(path),
                     "-o", str(path / "test")], check=True)
     subprocess.run([str(path / "test")], check=True)

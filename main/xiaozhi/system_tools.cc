@@ -1,4 +1,5 @@
 #include "system_tools.h"
+#include "memory_tools.h"
 #include <cJSON.h>
 #include <algorithm>
 #include <cmath>
@@ -22,8 +23,8 @@ constexpr Spec specs[]={
 {"self.system.action_status",R"({"name":"self.system.action_status","description":"查询异步系统操作结果：queued/running/succeeded/failed/cancelled/expired。只有succeeded才能说明对应操作已经执行；录音文件是否保存请再查recorder.get_status。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1}},"required":["id"],"additionalProperties":false}})"},
 {"self.system.cancel_action",R"({"name":"self.system.cancel_action","description":"取消尚未执行的系统操作。已开始录音需使用recorder.control stop，不会通过此工具停止已运行任务。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1}},"required":["id"],"additionalProperties":false}})"},
 {"self.notes.list",R"({"name":"self.notes.list","description":"查询本地AI笔记目录（最多8条），返回ID、标题、更新时间，不返回全文。可保存备忘、清单、晨间计划或学习摘记。","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})"},
-{"self.notes.read",R"({"name":"self.notes.read","description":"读取指定ID的本地AI笔记全文。先list确认ID。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1}},"required":["id"],"additionalProperties":false}})"},
-{"self.notes.save",R"({"name":"self.notes.save","description":"真正持久保存文字笔记到本机SD卡（需已挂载）。无id新建；有id更新整条笔记，先read保留原内容。标题最多96个UTF-8字节，正文最多1536字节；适合购物清单、工作备忘、日记与学习卡片。成功后可display.open notes在屏幕查看。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1},"title":{"type":"string","maxLength":32},"text":{"type":"string","maxLength":512}},"required":["title","text"],"additionalProperties":false}})"},
+{"self.notes.read",R"({"name":"self.notes.read","description":"读取指定ID的本地AI笔记全文、归档原文、项目、处理状态、revision与提醒关联状态。先list或memory.search确认ID。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1}},"required":["id"],"additionalProperties":false}})"},
+{"self.notes.save",R"({"name":"self.notes.save","description":"真正持久保存文字笔记到本机SD卡（需已挂载）。无id新建；有id更新普通笔记，先read保留原内容；归档记忆必须用memory.update并提供revision，原文不可覆盖。标题最多96个UTF-8字节，正文最多1536字节；适合购物清单、工作备忘、日记与学习卡片。成功后可display.open notes在屏幕查看。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1},"title":{"type":"string","maxLength":32},"text":{"type":"string","maxLength":512}},"required":["title","text"],"additionalProperties":false}})"},
 {"self.notes.delete",R"({"name":"self.notes.delete","description":"按用户要求删除指定ID的AI笔记。先list或read确认，不能猜ID。","inputSchema":{"type":"object","properties":{"id":{"type":"integer","minimum":1}},"required":["id"],"additionalProperties":false}})"},
 {"self.focus.start",R"({"name":"self.focus.start","description":"开始一次专注计时/番茄钟，默认25分钟。到时由本地闹钟轻铃提醒，重启可恢复但关机不唤醒。返回reminder_id；可用reminders.delete取消。不会覆盖已有闹钟。","inputSchema":{"type":"object","properties":{"minutes":{"type":"integer","minimum":1,"maximum":180},"title":{"type":"string","maxLength":32}},"additionalProperties":false}})"}
 };
@@ -46,21 +47,21 @@ std::string Print(const cJSON* json) {
     char* text=cJSON_PrintUnformatted(json);if (!text) return {};
     std::string out(text);cJSON_free(text);return out;
 }
-cJSON* NoteJson(const notes::Note& note,bool full) {
-    auto* out=cJSON_CreateObject();if (!out) return nullptr;
-    cJSON_AddNumberToObject(out,"id",note.id);cJSON_AddStringToObject(out,"title",note.title.c_str());
-    cJSON_AddNumberToObject(out,"updated_epoch",note.updated);
-    if (full) cJSON_AddStringToObject(out,"text",note.text.c_str());
-    return out;
+
 }
+size_t SystemTools::Count() {return sizeof(specs)/sizeof(specs[0])+MemoryToolCount();}
+const char* SystemTools::Schema(size_t index) {
+    constexpr size_t base=sizeof(specs)/sizeof(specs[0]);
+    return index<base ? specs[index].schema : MemoryToolSchema(index-base);
 }
-size_t SystemTools::Count() {return sizeof(specs)/sizeof(specs[0]);}
-const char* SystemTools::Schema(size_t index) {return index<Count() ? specs[index].schema : nullptr;}
 bool SystemTools::Knows(const char* name) {
+    if (MemoryToolKnows(name)) return true;
     return name && std::any_of(std::begin(specs),std::end(specs),[name](const auto& spec){return !std::strcmp(name,spec.name);});
 }
 ToolReply SystemTools::Handle(const char* name,const cJSON* args,int64_t now) {
     const auto bad=[](){return ToolReply{false,"参数无效，请遵守工具schema"};};
+    if (!name) return bad();
+    if (MemoryToolKnows(name)) return HandleMemoryTool(name,args,now,notes_,reminders_);
     SystemCommand command;
     const auto is=[name](const char* other){return !std::strcmp(name,other);};
     if (is("self.notes.list") || is("self.notes.read") || is("self.notes.save") || is("self.notes.delete")) {
@@ -68,7 +69,7 @@ ToolReply SystemTools::Handle(const char* name,const cJSON* args,int64_t now) {
         if (is("self.notes.list")) {
             if (!Keys(args,{})) return bad();
             Json list(cJSON_CreateArray(),cJSON_Delete);
-            for (const auto& n:notes_.List()) cJSON_AddItemToArray(list.get(),NoteJson(n,false));
+            for (const auto& n:notes_.List()) cJSON_AddItemToArray(list.get(),MemoryNoteJson(n,false,reminders_));
             return {true,Print(list.get())};
         }
         uint32_t id=0;
@@ -76,16 +77,17 @@ ToolReply SystemTools::Handle(const char* name,const cJSON* args,int64_t now) {
         if (is("self.notes.save")) {
             const char* title=Text(args,"title");const char* text=Text(args,"text");
             if (!Keys(args,{"id","title","text"}) || !title || !text) return bad();
-            notes::Note note{id,title,text,reminders::ValidClock(now) ? now : 0},saved;std::string error;
+            notes::Note note,saved;std::string error;
+            note.id=id;note.title=title;note.text=text;note.updated=reminders::ValidClock(now) ? now : 0;
             if (!notes_.Put(note,saved,error)) return {false,error};
-            Json result(NoteJson(saved,false),cJSON_Delete);return {true,Print(result.get())};
+            Json result(MemoryNoteJson(saved,false,reminders_),cJSON_Delete);return {true,Print(result.get())};
         }
         if (!Keys(args,{"id"}) || !id) return bad();
         if (is("self.notes.delete")) {
             std::string error;bool ok=notes_.Remove(id,error);return {ok,ok ? "已删除笔记" : error};
         }
         for (const auto& n:notes_.List()) if (n.id==id) {
-            Json result(NoteJson(n,true),cJSON_Delete);return {true,Print(result.get())};
+            Json result(MemoryNoteJson(n,true,reminders_),cJSON_Delete);return {true,Print(result.get())};
         }
         return {false,"未找到笔记，请先查询ID"};
     }

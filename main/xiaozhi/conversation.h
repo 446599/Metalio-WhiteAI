@@ -32,6 +32,8 @@ public:
     static constexpr size_t kAnswerBytes = 6144;
     static Conversation& GetInstance();
     ConversationSnapshot Snapshot() const;
+    // Frozen at Begin(): an archive command must not archive its own speech.
+    ConversationSnapshot PreviousCompleted() const;
     uint32_t Revision() const;
     uint32_t Begin();
     void SetState(TurnState state, const char* message = "");
@@ -46,8 +48,10 @@ public:
 private:
     void Changed();
     void ContentChanged();
+    void FreezePreviousLocked();
     mutable std::mutex mutex_;
     ConversationSnapshot data_;
+    ConversationSnapshot previous_completed_;
     bool has_sentences_ = false;
 };
 

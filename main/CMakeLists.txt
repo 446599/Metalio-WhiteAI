@@ -13,6 +13,7 @@ set(SOURCES
             "xiaozhi/capsule_store.cc"
             "xiaozhi/mcp_server.cc"
             "xiaozhi/system_tools.cc"
+            "xiaozhi/memory_tools.cc"
             "system/device_control.cc"
             "notes/note_store.cc"
             "notes/note_service.cc"

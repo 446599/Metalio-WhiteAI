@@ -23,9 +23,17 @@ void Conversation::ContentChanged() {
     if (data_.persisted_revision != 0) data_.message = "内容已更新，待保存";
 }
 ConversationSnapshot Conversation::Snapshot() const { std::lock_guard<std::mutex> lock(mutex_); return data_; }
+ConversationSnapshot Conversation::PreviousCompleted() const {
+    std::lock_guard<std::mutex> lock(mutex_);return previous_completed_;
+}
+void Conversation::FreezePreviousLocked() {
+    previous_completed_ = data_.state==TurnState::Done && !data_.truncated && !data_.transcript.empty()
+        ? data_ : ConversationSnapshot{};
+}
 uint32_t Conversation::Revision() const { std::lock_guard<std::mutex> lock(mutex_); return data_.revision; }
 uint32_t Conversation::Begin() {
     std::lock_guard<std::mutex> lock(mutex_);
+    FreezePreviousLocked();
     ++data_.turn;
     data_.transcript.clear(); data_.answer.clear(); data_.message.clear();
     data_.saved = false; data_.truncated = false; has_sentences_ = false;
@@ -68,6 +76,7 @@ void Conversation::ReceiveAnswer(const char* text, bool sentence) {
 }
 void Conversation::BeginFollowup(const char* label) {
     std::lock_guard<std::mutex> lock(mutex_);
+    FreezePreviousLocked();
     ++data_.turn; data_.answer.clear(); data_.saved = false;
     data_.content_revision = 1; data_.persisted_revision = 0;
     data_.saving_revision = 0; data_.save_failed = false;
@@ -113,6 +122,7 @@ void Conversation::Restore(const std::string& transcript, const std::string& ans
 void Conversation::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     const uint32_t turn = data_.turn + 1, revision = data_.revision;
+    previous_completed_ = {};
     data_ = {}; data_.turn = turn; data_.revision = revision; has_sentences_ = false; Changed();
 }
 std::string Conversation::Prompt(QuickAction action, const std::string& transcript) {

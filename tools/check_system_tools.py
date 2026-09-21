@@ -2,6 +2,7 @@
 """Run real MCP system parsing, notes persistence and operation queue on the host."""
 from pathlib import Path
 import subprocess,tempfile
+from host_cjson import cjson_flags
 ROOT=Path(__file__).resolve().parents[1]
 TEST=r'''
 #include "xiaozhi/mcp_server.h"
@@ -37,12 +38,12 @@ int main(){
  std::set<std::string> names;std::string cursor;int pages=0;
  do {
   auto r=parse(server.Handle("{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(++id)+",\"method\":\"tools/list\",\"params\":{\"cursor\":\""+cursor+"\"}}",now));
-  assert(!get(r.get(),"error"));const auto* page=get(r.get(),"result");const auto* list=get(page,"tools");assert(cJSON_GetArraySize(list)==3);
+  assert(!get(r.get(),"error"));const auto* page=get(r.get(),"result");const auto* list=get(page,"tools");assert(cJSON_GetArraySize(list)==static_cast<int>(std::min(size_t{3},size_t{26}-names.size())));
   const cJSON* tool; cJSON_ArrayForEach(tool,list){assert(names.insert(get(tool,"name")->valuestring).second);assert(cJSON_IsObject(get(tool,"inputSchema")));}
   const auto* next=get(page,"nextCursor");cursor=next?next->valuestring:"";++pages;
  } while(!cursor.empty());
- assert(pages==7 && names.size()==21);
- for (const char* bad:{"1","03","21","-3","3x","999999999"}) {
+ assert(pages==9 && names.size()==26);
+ for (const char* bad:{"1","03","27","-3","3x","999999999"}) {
   auto reply=parse(server.Handle("{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(++id)+",\"method\":\"tools/list\",\"params\":{\"cursor\":\""+bad+"\"}}",now));assert(get(reply.get(),"error"));
  }
  for (const char* bad:{"{}","{\"volume\":-1}","{\"volume\":101}","{\"volume\":0.5}","{\"volume\":true}","{\"volume\":\"50\"}","{\"volume\":50,\"extra\":1}","{\"volume\":1,\"volume\":2}"}) result("self.device.set_volume",bad,true);
@@ -66,7 +67,7 @@ int main(){
  fail=true;const auto revision=notes.Revision();result("self.notes.save","{\"id\":"+note_id+",\"title\":\"bad\",\"text\":\"bad\"}",true);
  result("self.notes.delete","{\"id\":"+note_id+"}",true);assert(notes.Revision()==revision && notes.List()[0].text=="牛奶和水果");fail=false;
  notes::Store reboot([](const auto&){return true;});assert(reboot.Restore(disk));assert(reboot.List()[0].text=="牛奶和水果");
- assert(!reboot.Restore("broken") && !reboot.Ready());notes::Note n;std::string error;assert(!reboot.Put({0,"x","x",now},n,error));
+ assert(!reboot.Restore("broken") && !reboot.Ready());notes::Note n,input;input.title="x";input.text="x";input.updated=now;std::string error;assert(!reboot.Put(input,n,error));
  for(int i=1;i<8;++i) result("self.notes.save","{\"title\":\"备忘\",\"text\":\"内容\"}");
  result("self.notes.save","{\"title\":\"多余\",\"text\":\"内容\"}",true);assert(notes.List().size()==8);
  result("self.notes.delete","{\"id\":"+note_id+"}");assert(notes.List().size()==7);
@@ -82,7 +83,8 @@ int main(){
  const auto expired=queue.Add(command,0);assert(!queue.Begin(expired,30000));assert(queue.Get(expired,30000)->state==State::Expired);
  const auto running=queue.Add(command,30001);assert(queue.Begin(running,30002));assert(!queue.Cancel(running));queue.CancelRecordings();queue.Finish(running,true,"started");assert(queue.Get(running,30003)->state==State::Cancelled);
  device::ActionQueue full;std::vector<uint32_t> ids;
- for(int i=0;i<8;++i) ids.push_back(full.Add(command,0));assert(!full.Add(command,0));
+ for(int i=0;i<8;++i) ids.push_back(full.Add(command,0));
+ assert(!full.Add(command,0));
  assert(full.Begin(ids[0],1));full.Finish(ids[0],true,"done");assert(full.Add(command,2));
  assert(!full.Get(ids[0],3));assert(full.Pending(30002).empty());
  char folder[]="/tmp/miaoink-notes-XXXXXX";assert(mkdtemp(folder));const std::string base=std::string(folder)+"/snapshot";
@@ -99,11 +101,10 @@ int main(){
  {std::ofstream corrupt(base+".1",std::ios::binary|std::ios::trunc);corrupt<<"bad";}
  notes::SnapshotFile damaged(base);assert(!damaged.Load(restored,valid));assert(!damaged.Save(disk));
  std::remove((base+".0").c_str());std::remove((base+".1").c_str());rmdir(folder);
- std::puts("System MCP OK: 21 tools / 7 pages, strict dispatch, idempotent retries, notifications, note CRUD / reboot / rollback / bounds, focus due, queue capacity / cancellation / expiry");
+ std::puts("System MCP OK: 26 tools / 9 pages, strict dispatch, idempotent retries, notifications, note CRUD / reboot / rollback / bounds, focus due, queue capacity / cancellation / expiry");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='miaoink-system-') as directory:
- p=Path(directory);(p/'test.cc').write_text(TEST);cjson=ROOT/'managed_components/espressif__cjson/cJSON'
- subprocess.run(['cc','-c',str(cjson/'cJSON.c'),'-I',str(cjson),'-o',str(p/'cjson.o')],check=True)
- subprocess.run(['c++','-std=c++17','-O1','-Wall','-Wextra','-fsanitize=undefined','-I',str(ROOT/'main'),'-I',str(cjson),str(p/'test.cc'),*[str(ROOT/'main'/name) for name in ['reminders/reminder_store.cc','notes/note_store.cc','xiaozhi/system_tools.cc','xiaozhi/mcp_server.cc']],str(p/'cjson.o'),'-o',str(p/'test')],check=True)
+ p=Path(directory);(p/'test.cc').write_text(TEST)
+ subprocess.run(['c++','-std=c++17','-O1','-Wall','-Wextra','-fsanitize=undefined','-I',str(ROOT/'main'),str(p/'test.cc'),*[str(ROOT/'main'/name) for name in ['reminders/reminder_store.cc','notes/note_store.cc','xiaozhi/system_tools.cc','xiaozhi/mcp_server.cc','xiaozhi/conversation.cc','xiaozhi/memory_tools.cc']],*cjson_flags(p),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)

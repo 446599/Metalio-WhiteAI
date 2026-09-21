@@ -101,7 +101,7 @@ bool Apply(const cJSON* args, reminders::Item& i, int64_t now, bool creating, st
 }  // namespace
 
 std::string McpServer::Handle(const std::string& payload, int64_t now) {
-    if (payload.empty() || payload.size() > 4096) return {};
+    if (payload.empty() || payload.size() > 4096 || notes::ContainsEncodedNull(payload)) return {};
     Json request(cJSON_ParseWithLengthOpts(payload.c_str(), payload.size()+1, nullptr, true), cJSON_Delete);
     Json response(cJSON_CreateObject(), cJSON_Delete);
     if (!response) return {};
@@ -128,7 +128,7 @@ std::string McpServer::Handle(const std::string& payload, int64_t now) {
         cJSON_AddStringToObject(result,"protocolVersion","2024-11-05");
         auto* caps = cJSON_AddObjectToObject(result,"capabilities"); cJSON_AddObjectToObject(caps,"tools");
         auto* info = cJSON_AddObjectToObject(result,"serverInfo");
-        cJSON_AddStringToObject(info,"name","miaoink4-system"); cJSON_AddStringToObject(info,"version","2.0.0");
+        cJSON_AddStringToObject(info,"name","miaoink4-system"); cJSON_AddStringToObject(info,"version","2.1.0");
     } else if (!std::strcmp(method,"ping")) {
         cJSON_AddObjectToObject(response.get(),"result");
     } else if (!std::strcmp(method,"tools/list")) {

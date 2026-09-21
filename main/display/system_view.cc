@@ -72,20 +72,21 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
     if (detail) {
         const auto it=std::find_if(items.begin(),items.end(),[this](const auto& item){return item.id==note_id_;});
         DrawProductHeadingLocked(it==items.end() ? "笔记已删除" : it->title.c_str(),"笔记");
-        const std::string body=it==items.end() ? "返回笔记目录查看其他内容。" : it->text;
-        const auto lines=raw_font::Wrap(body,416,[](uint32_t cp){return raw_font::Lookup(ui_font_body,cp).advance;});
-        constexpr int per_page=12;
-        note_text_pages_=std::max(1,(static_cast<int>(lines.size())+per_page-1)/per_page);
-        note_text_page_=std::clamp(note_text_page_,0,note_text_pages_-1);
-        for (int i=0;i<per_page && note_text_page_*per_page+i<static_cast<int>(lines.size());++i)
-            DrawText(32,152+i*40,lines[note_text_page_*per_page+i].c_str(),ui_font_body);
+        const std::string body=it==items.end() ? "返回笔记目录查看其他内容。" : notes::DisplayBody(*it);
+        const auto text_page=raw_font::Paginate(body,416,
+            static_cast<size_t>(std::max(0,note_text_page_)),12,
+            [](uint32_t cp){return raw_font::Lookup(ui_font_body,cp).advance;});
+        note_text_pages_=static_cast<int>(text_page.pages);
+        note_text_page_=static_cast<int>(text_page.page);
+        for (size_t i=0;i<text_page.lines.size();++i)
+            DrawText(32,152+static_cast<int>(i)*40,text_page.lines[i].c_str(),ui_font_body);
         char page[32];std::snprintf(page,sizeof(page),"%d / %d",note_text_page_+1,note_text_pages_);
         DrawTextCentered(32,640,416,32,page,ui_font_small);
         for (int i=0;i<2;++i) {
             StrokeRoundRect((i ? 248 : 32),672,200,48,12,1);
             DrawTextCentered((i ? 248 : 32),672,200,48,i ? "下一页" : "上一页",ui_font_small);
         }
-        DrawProductControlRailLocked("返回目录 / 可让小智修改笔记");
+        DrawProductControlRailLocked("返回目录 / 语音整理，保留原文");
         return;
     }
     notes_pages_=std::max(1,(static_cast<int>(items.size())+5)/6);
@@ -95,7 +96,9 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
     DrawProductHeadingLocked("AI 笔记",count);
     for (int row=0;row<6 && notes_page_*6+row<static_cast<int>(items.size());++row) {
         const auto& note=items[notes_page_*6+row];note_ids_[row]=note.id;
-        const auto stamp=note.updated ? reminders::LocalTime(note.updated).substr(5,11) : "时间未同步";
+        std::string stamp=note.updated ? reminders::LocalTime(note.updated).substr(5,11) : "时间未同步";
+        if (!note.project.empty()) stamp=note.project+" / "+stamp;
+        if (note.done) stamp="已处理 / "+stamp;
         DrawProductIconRowLocked(144+row*80,lucide::Id::NotebookPen,note.title.c_str(),stamp.c_str(),navigation_index_==row);
     }
     if (items.empty()) {
