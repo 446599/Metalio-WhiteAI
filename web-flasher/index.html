@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>WhiteAI · 分区刷机</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <main>
+    <header class="topbar"><a class="brand" href="./" aria-label="WhiteAI 刷机首页"><span class="mark" aria-hidden="true">W</span>WHITEAI<span class="brand-sub">/ FLASH</span></a><span class="chip-tag">ESP32-S3</span></header>
+    <section class="intro"><p class="eyebrow">METALIO E-INK 4</p><h1>只更新，你需要的部分。</h1><p class="lede">连接设备，选择分区，写入本地文件。<br class="mobile-break">其余 Flash 扇区保持不动。</p></section>
+    <p id="support" class="notice" role="status" hidden></p>
+    <section class="panel connection" aria-labelledby="connection-title">
+      <div class="section-heading"><div><span class="step">01</span><h2 id="connection-title">连接设备</h2></div><span id="connection-state" class="badge">未连接</span></div>
+      <div class="connection-line"><div><strong id="device-name">通过 USB 连接你的 WhiteAI</strong><p id="device-detail" class="muted">先关闭串口监视器。连接操作会使设备进入下载模式。</p></div><button id="connect" class="primary">连接设备 <span aria-hidden="true">↗</span></button><button id="disconnect" hidden>断开</button></div>
+      <details class="connection-settings"><summary>连接选项与帮助</summary><div class="fields"><label>波特率<select id="baud"><option value="115200">115200 · 稳定优先</option><option value="460800">460800</option><option value="921600">921600 · 高速</option></select></label><label>进入下载模式<select id="reset"><option value="default_reset">自动复位</option><option value="no_reset">已手动进入下载模式</option></select></label></div><p class="muted">自动连接失败时，按住 BOOT（AI）键并复位或重新上电，松开后选“已手动进入下载模式”。请确认 USB 处于烧录通路。</p></details>
+    </section>
+    <section class="panel" aria-labelledby="partition-title">
+      <div class="section-heading"><div><span class="step">02</span><h2 id="partition-title">选择刷写内容</h2></div><span id="selection-count" class="muted">已选 1 项</span></div>
+      <div class="presets" role="group" aria-label="快捷方案"><button data-preset="app" class="preset active">仅应用<span>保留字体与配置</span></button><button data-preset="app-font" class="preset">应用＋字体<span>更新界面字库</span></button><button data-preset="initial" class="preset">首次部署<span>含启动信息，需确认</span></button></div>
+      <p class="slot-note">更新 ota_0 不会自动切换启动槽；曾执行 OTA 的设备，请先核对正在使用的槽位。</p>
+      <div class="table-toolbar"><label class="inline-check"><input id="show-system" type="checkbox">显示系统与数据分区</label><button id="import-layout" class="text-button">导入分区表</button><input id="layout-file" type="file" accept=".csv,.bin" hidden><button id="device-layout" class="text-button" disabled>使用设备布局</button><button id="default-layout" class="text-button">恢复预设</button></div>
+      <p id="layout-status" class="layout-status">布局：Metalio 16 MB 预设 · 尚未与设备核对</p>
+      <div class="table-wrap"><table><thead><tr><th scope="col"><span class="sr-only">选择</span></th><th scope="col">分区</th><th scope="col">地址 / 容量</th><th scope="col">本地文件</th><th scope="col"><span class="sr-only">备份</span></th></tr></thead><tbody id="partitions"></tbody></table></div>
+      <div class="table-footer"><button id="add-custom" class="text-button">＋ 自定义地址</button><span class="muted">.bin / .fontpack · 文件只在浏览器中处理</span></div>
+    </section>
+    <section class="panel flash-panel" aria-labelledby="flash-title"><div class="section-heading"><div><span class="step">03</span><h2 id="flash-title">检查并刷写</h2></div><span class="badge">不执行整片擦除</span></div><p id="result" class="result" role="status" aria-live="polite">尚未开始。请先连接设备，并为已选分区添加文件。</p><progress id="progress" max="100" value="0" aria-label="刷写进度"></progress><div class="flash-actions"><label class="inline-check"><input id="auto-restart" type="checkbox" checked>完成后重启</label><div><button id="restart" disabled>重启设备</button><button id="review" class="primary" disabled>检查刷写计划 <span aria-hidden="true">→</span></button></div></div><p class="muted fineprint">刷写会擦除文件覆盖的完整 4 KiB 扇区，包括末尾不足一扇区的剩余字节。开始后请勿拔线或关闭页面。</p></section>
+    <details class="logs"><summary>运行日志 <span id="log-count">0</span></summary><pre id="log" aria-label="运行日志"></pre><button id="save-log" class="text-button">保存日志</button></details>
+    <footer><span>WHITEAI · LOCAL FIRST</span><span>Chrome / Edge 桌面版 · HTTPS 或 localhost</span></footer>
+  </main>
+  <dialog id="confirmation" aria-labelledby="confirm-title"><form method="dialog"><div class="section-heading"><h2 id="confirm-title">确认这一次写入</h2><button value="cancel" class="close" aria-label="关闭">×</button></div><p class="muted" id="confirm-device"></p><div id="plan-files"></div><div id="plan-warnings" class="warning-box"></div><label class="inline-check acknowledge"><input id="acknowledge" type="checkbox">我已核对设备、启动槽，并备份重要数据。</label><label id="risk-label" hidden>包含敏感分区或自定义地址，请输入 <strong>FLASH</strong><input id="risk-text" type="text" autocomplete="off" spellcheck="false" placeholder="FLASH"></label><p id="confirm-error" class="error" role="alert"></p><div class="dialog-actions"><button value="cancel">返回修改</button><button type="button" id="start" class="primary">开始刷写</button></div></form></dialog>
+  <noscript>此工具需要 JavaScript 和 Web Serial。请使用桌面 Chrome 或 Edge。</noscript>
+</body>
+</html>
