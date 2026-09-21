@@ -1,4 +1,6 @@
 #include "raw_display.h"
+#include "network/wifi_setup.h"
+#include "notes/note_writer.h"
 #include "binary_refresh.h"
 #include "font/raw_font.h"
 #include "font/text_layout.h"
@@ -649,6 +651,7 @@ void RawDisplay::TouchTask() {
 
 bool RawDisplay::HandleAiKey(bool down) {
     if (down) {
+        if (form_active_.load()) return false;
         if (xiaozhi::AudioSession::GetInstance().RecorderState().mode != audio::RecorderMode::Idle) return false;
         if (ai_key_down_.exchange(true)) return true;
         const bool accepted = xiaozhi::Client::GetInstance().ListenStart();
@@ -665,7 +668,7 @@ bool RawDisplay::HandleAiKey(bool down) {
 void RawDisplay::ShowAiConversation() {
     SetPowerSaveMode(false);
     DisplayLockGuard lock(this);
-    if (animation_running_.load()) return;
+    if (animation_running_.load() || form_active_.load()) return;
     screen_test_mode_ = false;
     test_console_mode_ = false;
     product_page_ = ProductPage::AiResult;
@@ -677,6 +680,7 @@ void RawDisplay::ShowAiConversation() {
 
 void RawDisplay::HandleHomeTap(int x, int y) {
     if (HandleReminderTap(x,y)) return;
+    if (HandleSetupTap(x,y)) return;
     enum class Action { None, Gray4, PaperMono, PaperText, AnimDu, AnimFc, PaperPage };
     Action action = Action::None;
     int ai_action = -1;
@@ -724,7 +728,7 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                 }
                 case ProductPage::Apps:
                 case ProductPage::More: {
-                    const int count = product_page_ == ProductPage::Apps ? 7 : 4;
+                    const int count = product_page_ == ProductPage::Apps ? 7 : 5;
                     const int row = ProductRowAt(x, y, count, kUiRowPitch, kUiRowHeight);
                     if (row >= 0) {
                         navigation_index_ = row;
@@ -808,6 +812,10 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                     }
                     break;
                 }
+                case ProductPage::WifiList:
+                case ProductPage::WifiCredentials:
+                case ProductPage::TextEntry:
+                case ProductPage::NoteCompose:
                 case ProductPage::Workbench:
                 case ProductPage::Settings:
                     break;
@@ -908,6 +916,8 @@ void RawDisplay::HandleHomeTap(int x, int y) {
 
 bool RawDisplay::HandleHardwareKey(HardwareKey key) {
     if (reminders::Service::Instance().IsActive()) return true;
+    if (HandleSetupKey(key)) return true;
+    bool scan_wifi = false;
     bool refresh_tap = false;
     bool wake = false;
     bool redraw = false;
@@ -1042,7 +1052,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                     } else if (product_page_ == ProductPage::Keep) {
                         set_page(ProductPage::Home);
                     } else if (product_page_ == ProductPage::More) {
-                        navigation_index_ = (navigation_index_ + 1) % 4;
+                        navigation_index_ = (navigation_index_ + 1) % 5;
                         redraw = true;
                     } else if (product_page_ == ProductPage::Confirmation) {
                         set_page(ProductPage::QuickNote);
@@ -1071,13 +1081,16 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                         // Any hardware key wakes the keep-screen snapshot.
                         set_page(ProductPage::Home);
                     } else if (product_page_ == ProductPage::Confirmation) {
-                        set_page(ProductPage::TodayList);
-                        hardware_notice = "已加入今日清单";
+                        set_page(ProductPage::QuickNote);
+                        hardware_notice = "此处是演示，请通过提醒工具保存";
                     } else if (product_page_ == ProductPage::More) {
-                        switch (navigation_index_ % 4) {
-                            case 0: set_page(ProductPage::Workbench); break;
-                            case 1: refresh_tap = true; break;
-                            case 2: set_page(ProductPage::Settings); break;
+                        switch (navigation_index_ % 5) {
+                            case 0:
+                                ClearFormLocked(); wifi_page_=0; wifi_switch_confirm_=false;
+                                set_page(ProductPage::WifiList); scan_wifi=true; break;
+                            case 1: set_page(ProductPage::Workbench); break;
+                            case 2: refresh_tap = true; break;
+                            case 3: set_page(ProductPage::Settings); break;
                             default:
                                 test_console_mode_=true; DrawTestConsoleLocked(); FlushLocked(); redraw=false; break;
                         }
@@ -1097,6 +1110,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
         SetPowerSaveMode(false);
         return true;
     }
+    if (scan_wifi) (void)network::WifiSetup::Instance().Scan();
     if (refresh_tap) {
         dashboard::DashboardService::GetInstance().RefreshNow();
         ShowNotification("正在刷新天气与额度", 2000);
@@ -1550,6 +1564,10 @@ void RawDisplay::FrameDumpTask() {
                                 case ProductPage::Recorder: page_name = "recorder"; break;
                                 case ProductPage::Notes: page_name = "notes"; break;
                                 case ProductPage::NoteDetail: page_name = "note_detail"; break;
+                                case ProductPage::WifiList: page_name = "wifi_list"; break;
+                                case ProductPage::WifiCredentials: page_name = "wifi_credentials"; break;
+                                case ProductPage::TextEntry: page_name = "text_input"; break;
+                                case ProductPage::NoteCompose: page_name = "note_compose"; break;
                             }
                         }
                         char response[160];
@@ -1645,6 +1663,13 @@ void RawDisplay::DumpFrameToSerial(int fd, bool panel_frame) {
     if (frame_dump_fb_ == nullptr || !Lock(1000)) {
         static constexpr char kBusy[] = "@@RAW_FRAME_ERROR busy\n";
         (void)SerialWriteAll(fd, kBusy, sizeof(kBusy) - 1U);
+        return;
+    }
+    // Never export pixels from a password editor, including the revealed view.
+    if (edit_target_==EditTarget::WifiPassword) {
+        Unlock();
+        static constexpr char hidden[]="@@RAW_FRAME_ERROR sensitive_input\n";
+        (void)SerialWriteAll(fd,hidden,sizeof(hidden)-1);
         return;
     }
     const size_t bytes = panel_frame ? panel_size_ : portrait_size_;
@@ -2574,7 +2599,7 @@ void RawDisplay::DrawProductControlRailLocked(const char* context) {
     // One passive line. The capacitive cover keys and BOOT retain their routes;
     // there are no on-screen footer buttons or invisible footer hit targets.
     FillRect(kUiInset, kUiRailY, kUiContentWidth, 1, true);
-    const bool notice = notification_text_[0] != '\0' &&
+    const bool notice = !form_active_.load() && notification_text_[0] != '\0' &&
                         notification_deadline_ms_ > esp_timer_get_time() / 1000;
     const char* hint = notice ? notification_text_ :
                        (context ? context : "HOME 首页 / PREV 返回 / NEXT 下一项");
@@ -3040,12 +3065,12 @@ void RawDisplay::DrawProductConfirmationLocked() {
 void RawDisplay::DrawProductMoreLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
     DrawProductStatusBarLocked();
-    DrawProductHeadingLocked("设备选项", "设备");
-    static constexpr const char* items[] = {"设备状态", "刷新数据", "系统信息", "屏幕测试"};
-    static constexpr const char* details[] = {"网络、天气与额度", "重新获取天气与额度", "布局、连接与省电", "显示与刷新诊断"};
-    static constexpr lucide::Id icons[]={lucide::Id::Info,lucide::Id::RefreshCw,lucide::Id::Settings2,lucide::Id::Monitor};
-    for (int i=0;i<4;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],items[i],details[i],navigation_index_==i);
-    DrawProductControlRailLocked("PREV 返回首页");
+    DrawProductHeadingLocked("设备设置", "设置");
+    static constexpr const char* items[] = {"Wi-Fi", "设备状态", "刷新数据", "系统信息", "屏幕测试"};
+    static constexpr const char* details[] = {"扫描网络、输入密码", "网络、天气与额度", "重新获取天气与额度", "布局、连接与省电", "高级显示诊断"};
+    static constexpr lucide::Id icons[]={lucide::Id::Settings2,lucide::Id::Info,lucide::Id::RefreshCw,lucide::Id::Settings2,lucide::Id::Monitor};
+    for (int i=0;i<5;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],items[i],details[i],navigation_index_==i);
+    DrawProductControlRailLocked("PREV 返回首页 / NEXT 选择项目");
 }
 
 void RawDisplay::DrawProductScreenLocked() {
@@ -3055,10 +3080,15 @@ void RawDisplay::DrawProductScreenLocked() {
     last_conversation_revision_ = xiaozhi::Conversation::GetInstance().Revision();
     last_recorder_revision_ = xiaozhi::AudioSession::GetInstance().RecorderState().revision;
     last_notes_revision_ = notes::DeviceStore().Revision();
+    last_wifi_revision_ = network::WifiSetup::Instance().Revision();
+    last_writer_revision_ = notes::Writer::Instance().Snapshot().revision;
+    AdvanceFormsLocked();
     if (reminder_alert_.active) {
+        password_reveal_=false;
         DrawReminderAlertLocked();
         return;
     }
+    if (discard_pending_) {DrawProductDiscardLocked();return;}
     switch (product_page_) {
         case ProductPage::Home: DrawProductHomeLocked(); break;
         case ProductPage::AiResult: DrawProductAiLocked(false); break;
@@ -3078,6 +3108,10 @@ void RawDisplay::DrawProductScreenLocked() {
         case ProductPage::Recorder: DrawProductRecorderLocked(); break;
         case ProductPage::Notes: DrawProductNotesLocked(false); break;
         case ProductPage::NoteDetail: DrawProductNotesLocked(true); break;
+        case ProductPage::WifiList: DrawProductWifiLocked(false); break;
+        case ProductPage::WifiCredentials: DrawProductWifiLocked(true); break;
+        case ProductPage::TextEntry: DrawProductTextEntryLocked(); break;
+        case ProductPage::NoteCompose: DrawProductNoteComposeLocked(); break;
     }
 }
 
@@ -4380,7 +4414,9 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
     if (!update_all && tmv.tm_min == last_minute_ && battery_percent_ == last_drawn_battery_ &&
         charging_ == last_drawn_charging_ && dashboard_revision == last_dashboard_revision_ &&
         xiaozhi::Conversation::GetInstance().Revision() == last_conversation_revision_ &&
-        xiaozhi::AudioSession::GetInstance().RecorderState().revision == last_recorder_revision_ && !notification_expired && notes::DeviceStore().Revision()==last_notes_revision_) return;
+        xiaozhi::AudioSession::GetInstance().RecorderState().revision == last_recorder_revision_ && !notification_expired && notes::DeviceStore().Revision()==last_notes_revision_ &&
+        network::WifiSetup::Instance().Revision()==last_wifi_revision_ &&
+        notes::Writer::Instance().Snapshot().revision==last_writer_revision_) return;
     last_minute_ = tmv.tm_min;
     last_drawn_battery_ = battery_percent_;
     last_drawn_charging_ = charging_;
@@ -4416,7 +4452,7 @@ void RawDisplay::SetPowerSaveMode(bool on) {
     bool changed = false;
     {
         DisplayLockGuard lock(this);
-        if (power_save_ == on) return;
+        if (power_save_ == on || (on && form_active_.load())) return;
         power_save_ = on;
         changed = true;
         if (portrait_fb_ && !screen_test_mode_ && !test_console_mode_) {

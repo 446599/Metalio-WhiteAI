@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <atomic>
+#include <mutex>
 
 #include <esp_event.h>
 #include <esp_timer.h>
@@ -22,6 +23,7 @@ struct WifiApRecord {
 struct WifiScanAp {
     std::string ssid;
     int8_t rssi = 0;
+    wifi_auth_mode_t authmode = WIFI_AUTH_OPEN;
 };
 
 class WifiStation {
@@ -37,9 +39,14 @@ public:
     bool ScanForList(std::vector<WifiScanAp>& out, int timeout_ms = 8000);
     // 触发一次自动扫连（匹配 NVS 已保存 SSID）。
     void StartAutoConnectScan();
+    // UI provisioning owns the radio temporarily, but never writes NVS here.
+    bool ConnectForSetup(const std::string& ssid, const std::string& password, bool open,
+                         int timeout_ms, const std::function<bool()>& cancelled);
+    void FinishSetup(bool keep_connection);
+    bool SetupBusy() const { return manual_setup_.load() || listing_scan_.load(); }
     int8_t GetRssi();
-    std::string GetSsid() const { return ssid_; }
-    std::string GetIpAddress() const { return ip_address_; }
+    std::string GetSsid() const { std::lock_guard<std::recursive_mutex> lock(state_mutex_); return ssid_; }
+    std::string GetIpAddress() const { std::lock_guard<std::recursive_mutex> lock(state_mutex_); return ip_address_; }
     uint8_t GetChannel();
     void SetPowerSaveMode(bool enabled);
 
@@ -58,9 +65,13 @@ private:
     esp_event_handler_instance_t instance_any_id_ = nullptr;
     esp_event_handler_instance_t instance_got_ip_ = nullptr;
     esp_netif_t* station_netif_ = nullptr;
-    bool started_ = false;
+    std::atomic<bool> started_{false};
+    std::atomic<bool> manual_setup_{false}, manual_attempting_{false};
+    mutable std::recursive_mutex state_mutex_;
+    std::mutex operation_mutex_;
     std::atomic<bool> listing_scan_{false};
     std::vector<WifiScanAp> list_scan_results_;
+    bool list_scan_ok_ = false;
     std::string ssid_;
     std::string password_;
     std::string ip_address_;
