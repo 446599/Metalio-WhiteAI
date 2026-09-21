@@ -15,6 +15,7 @@
 #include "cx25601n.h"
 #include "pcf8563.h"
 #include "settings.h"
+#include "system/boot_diag.h"
 #include "esp_lcd_panel_ssd1677.h"
 #include "esp_lcd_ssd1677_commands.h"
 
@@ -202,6 +203,9 @@ private:
     void InitializeIOExpander() {
         auto& io = IOExpander::getInstance();
         ESP_ERROR_CHECK(io.begin(i2c_bus_));
+        // External FSUSB42UMX switch: select the physical flash/debug port.
+        // This is independent of the ESP32 internal OTG/USJ PHY routing.
+        ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::USB_MUX_SEL, true));
         // 先开总电源，再开屏幕卡座供电
         ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::MAIN_PWR, true));
         ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::SCREEN_SOCKET_PWR, true));
@@ -210,11 +214,12 @@ private:
         ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::PA, true));
         // 关机脉冲 = P1.3(P13) 空闲拉高；begin 时输出脚默认 0
         ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::PWR_KEY_PULSE, true));
-        // 触摸 RST = P1.1(原理图 P11)：上电复位 L → Tpr → H → Tron（begin 已置 L）
+        // Reset only CST816S; begin no longer drives every output LOW.
+        ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::TOUCH_RST, false));
         vTaskDelay(pdMS_TO_TICKS(10));   // Tpr ≥5ms
         ESP_ERROR_CHECK(io.setLevel(IOExpander::Pin::TOUCH_RST, true));
         vTaskDelay(pdMS_TO_TICKS(120));  // Tron ≥100ms
-        ESP_LOGI(TAG, "MAIN_PWR + SCREEN_SOCKET_PWR on; PA=1; TP_RST(P1.1/P11) L->H; PWR_KEY(P1.3/P13)=H");
+        ESP_LOGI(TAG, "MAIN_PWR + SCREEN_SOCKET_PWR on; PA=1; USB_MUX=flash; TP_RST(P1.1/P11) L->H; PWR_KEY(P1.3/P13)=H");
 
         // TCA9555 INT → 主控 GPIO2（开漏低有效，内部上拉）
         gpio_config_t int_conf = {};
@@ -744,6 +749,7 @@ public:
           power_button_(POWER_BUTTON_GPIO, false, kPowerLongPressMs) {
         InitializeI2c();
         InitializeIOExpander();
+        boot_diag::Mark(boot_diag::Stage::kBoardI2c);
         InitializeVibrationMotor();
         // BQ27220 挂到 I2C；失败不崩溃，GetBatteryLevel 内会节流自愈重试。
         (void)Bq27220Gauge::GetInstance().Begin(i2c_bus_);
@@ -751,14 +757,18 @@ public:
         InitializeCx25601n();
         InitializeBTAudio();
         InitializeSdCard();
+        boot_diag::Mark(boot_diag::Stage::kBoardSd);
         InitializeSsd1677();
+        boot_diag::Mark(boot_diag::Stage::kBoardPanel);
         const bool touch_ok = InitializeTouch();
         InitializeDisplay();
+        boot_diag::Mark(boot_diag::Stage::kBoardDisplay);
         if (!touch_ok) {
             ESP_LOGW(TAG, "Touch missing; TouchMissingScreen should be showing");
         }
         InitializeButtons();
         StartSystemMonitor();
+        boot_diag::Mark(boot_diag::Stage::kBoardReady);
     }
 
     virtual AudioCodec* GetAudioCodec() override {

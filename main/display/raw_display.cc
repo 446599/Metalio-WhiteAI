@@ -19,6 +19,7 @@
 #include "reminders/reminder_service.h"
 #include "reminders/presentation.h"
 #include "notes/note_service.h"
+#include "system/boot_diag.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "hal/usb_serial_jtag_ll.h"
@@ -418,7 +419,11 @@ uint32_t FrameCrc32(const uint8_t* data, size_t size) {
 }
 
 bool SerialWriteAll(int fd, const char* data, size_t size) {
-    if (fd < 0 || data == nullptr || !usb_serial_jtag_is_driver_installed()) return false;
+    // Replies are written through the USB Serial/JTAG driver. `fd` is kept only
+    // so call sites can keep passing their channel handle; a missing
+    // /dev/secondary VFS node must never suppress a reply.
+    (void)fd;
+    if (data == nullptr || !usb_serial_jtag_is_driver_installed()) return false;
     // VFS reports the requested byte count even when its per-character timeout
     // drops data. Use the driver's actual count and serialize complete protocol
     // lines with the default printf logger.
@@ -1241,13 +1246,20 @@ void RawDisplay::FrameDumpTask() {
     }
     usb_serial_jtag_vfs_use_driver();
     funlockfile(stdout);
+    // The product reader owns the RX path from here on, so the early boot
+    // diagnostic task stops reading and cannot split a command in two.
+    boot_diag::SetDisplayReaderActive();
     ESP_LOGI(TAG, "serial input ready (FRAME?; TOUCH TAP/CLICK/DOWN/MOVE/UP)");
+    bool secondary_open_failed = false;
     while (!frame_dump_stop_) {
-        if (fd < 0) {
+        if (fd < 0 && !secondary_open_failed) {
             fd = ::open("/dev/secondary", O_WRONLY | O_NONBLOCK);
             if (fd < 0) {
-                vTaskDelay(pdMS_TO_TICKS(250));
-                continue;
+                // Replies go through the driver, so an unavailable VFS node must
+                // not gate command RX. Try once and keep serving commands.
+                secondary_open_failed = true;
+                ESP_LOGW(TAG, "secondary node unavailable (%s); replies still use the driver",
+                         std::strerror(errno));
             }
         }
 

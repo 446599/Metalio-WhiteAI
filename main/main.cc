@@ -7,11 +7,17 @@
 #include <ctime>
 
 #include "application.h"
+#include "system/boot_diag.h"
 
 #define TAG "main"
 
 extern "C" void app_main(void)
 {
+    // Start the early diagnostic channel before anything else can fail, so a
+    // board that never reaches the product UI can still be interrogated.
+    boot_diag::Mark(boot_diag::Stage::kAppMain);
+    boot_diag::Init();
+
     // System/Unix time stays UTC; RTC and UI use the device's local timezone.
     setenv("TZ", "CST-8", 1);
     tzset();
@@ -24,6 +30,7 @@ extern "C" void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    boot_diag::Mark(boot_diag::Stage::kNvsReady);
 
     Application::GetInstance().Start();
 }

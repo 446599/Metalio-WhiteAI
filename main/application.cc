@@ -1,5 +1,6 @@
 #include "application.h"
 #include "notes/note_service.h"
+#include "system/boot_diag.h"
 #include "system/device_control.h"
 
 #include "board.h"
@@ -61,9 +62,11 @@ Application::~Application() {
 }
 
 void Application::Start() {
+    boot_diag::Mark(boot_diag::Stage::kAppStart);
     ESP_LOGI(TAG, "start raw AI dashboard firmware (no LVGL)");
     SetDeviceState(kDeviceStateStarting);
 
+    boot_diag::Mark(boot_diag::Stage::kHalBegin);
     GetHAL().Init();
 
     SetDeviceState(kDeviceStateIdle);
@@ -86,6 +89,7 @@ void Application::Start() {
     } else if (auto* display = Board::GetInstance().GetDisplay()) {
         display->UpdateStatusBar(true);
     }
+    boot_diag::Mark(boot_diag::Stage::kHomeShown);
 
     // A provisioning request recorded by the serial command has to be honoured
     // before any network provider starts; the config AP path never returns.
@@ -100,6 +104,7 @@ void Application::Start() {
         notes::Start();
         reminders::Service::Instance().Start();
         xiaozhi::Client::GetInstance().Start();
+        boot_diag::Mark(boot_diag::Stage::kProvidersStarted);
     }
 }
 

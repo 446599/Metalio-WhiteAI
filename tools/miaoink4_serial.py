@@ -87,6 +87,12 @@ class SerialLink:
                     # Darwin speed ioctl; real /dev/cu.* nodes do.
                     if exc.errno != errno.ENOTTY:
                         raise
+            # Darwin asserts DTR/RTS when the node is opened. On ESP32-S3 USB
+            # Serial/JTAG those lines drive EN and GPIO0, so leaving them
+            # asserted holds the target in ROM download mode and the product
+            # firmware never runs. Release both so the application keeps
+            # running while we talk to it.
+            self._release_modem_lines()
         except Exception:
             self.close()
             raise
@@ -94,6 +100,22 @@ class SerialLink:
         # Drain boot chatter so the first command is not joined to an old line.
         self.drain(1.5)
         return self
+
+    # Darwin's modem-control ioctls have no Python wrapper, so the raw values
+    # are spelled out here (sys/ioctl.h / ttycom.h).
+    _TIOCM_DTR = 0x002
+    _TIOCM_RTS = 0x004
+    _TIOCMBIC = 0x8004746B  # clear the given modem bits
+
+    def _release_modem_lines(self) -> None:
+        """Deassert DTR/RTS so the target is not held in download mode."""
+        try:
+            fcntl.ioctl(self.fd, self._TIOCMBIC,
+                        struct.pack("I", self._TIOCM_DTR | self._TIOCM_RTS))
+        except OSError as exc:
+            # Pseudo-terminals used by host-side tests have no modem lines.
+            if exc.errno != errno.ENOTTY:
+                raise
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -170,7 +192,7 @@ def _print_reply(link: SerialLink, command: str, timeout: float) -> int:
         if line.startswith("@@"):
             print(line)
             got_reply = True
-            if line.startswith(("@@INPUT_ACK", "@@INPUT_ERROR", "@@STATE", "@@INPUT_HELP", "@@FONT_ACK", "@@CAPSULE_ACK", "@@MCP_REPLY", "@@REMINDER_STATE")):
+            if line.startswith(("@@INPUT_ACK", "@@INPUT_ERROR", "@@STATE", "@@INPUT_HELP", "@@FONT_ACK", "@@CAPSULE_ACK", "@@MCP_REPLY", "@@REMINDER_STATE", "@@DIAG_")):
                 break
     if not got_reply:
         print("(未收到协议回复；普通 UI 命令可能只触发动作，不回 ACK)", file=sys.stderr)

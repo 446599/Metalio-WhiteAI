@@ -15,6 +15,7 @@ set(SOURCES
             "xiaozhi/system_tools.cc"
             "xiaozhi/memory_tools.cc"
             "system/device_control.cc"
+            "system/boot_diag.cc"
             "notes/note_store.cc"
             "notes/note_service.cc"
             "reminders/reminder_store.cc"

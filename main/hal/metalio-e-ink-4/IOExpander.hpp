@@ -35,6 +35,7 @@ public:
         TOUCH_RST,              // P1.1 / 原理图 P11 — 触摸 CST816 RST（低有效）
         PWR_KEY_PULSE,          // P1.3 / 原理图 P13 — 开关机脉冲输出
         ACCEL_INT,              // P1.4 — 加速度计 INT（输入）
+        USB_MUX_SEL,            // TCA9555 P0.0: high=flash/debug, low=camera
         kPinCount,
     };
 
@@ -59,6 +60,7 @@ public:
         {Pin::TOUCH_RST,         9, Direction::kOutput},  // P1.1 / 原理图 P11 — 触摸 RST
         {Pin::PWR_KEY_PULSE,    11, Direction::kOutput},  // P1.3 / 原理图 P13 — 关机脉冲
         {Pin::ACCEL_INT,        12, Direction::kInput},   // P1.4
+        {Pin::USB_MUX_SEL,       0, Direction::kOutput},  // P0.0, NOT ESP32 GPIO0
     };
 
     static IOExpander& getInstance()
@@ -82,6 +84,7 @@ public:
             case Pin::TOUCH_RST:         return "TOUCH_RST";
             case Pin::PWR_KEY_PULSE:     return "PWR_KEY_PULSE";
             case Pin::ACCEL_INT:         return "ACCEL_INT";
+            case Pin::USB_MUX_SEL:       return "USB_MUX_SEL";
             default:                     return "?";
         }
     }
@@ -337,10 +340,9 @@ private:
             if (ret != ESP_OK) {
                 return ret;
             }
-            ret = esp_io_expander_set_level(handle_, output_mask, 0);
-            if (ret != ESP_OK) {
-                return ret;
-            }
+            // Match the official board: keep the driver-reset HIGH latches.
+            // Driving every output LOW drops peripheral rails and would
+            // also switch USB_MUX_SEL to the camera. Set lows individually.
         }
 
         if (input_mask != 0) {
