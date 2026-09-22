@@ -1,0 +1,102 @@
++++ b/tools/preview_weather_support.py
+@@ -0,0 +1,51 @@
++"""Actual weather model and UI; HTTP is not used by framebuffer tests."""
++HEADERS=r'''
++#include "dashboard/weather_provider.h"
++namespace dashboard {
++class DashboardService {
++public:
++    unsigned refreshes=0;
++    static DashboardService& GetInstance(){static DashboardService s;return s;}
++    void RefreshNow(){assert(ui_lock_depth==0);++refreshes;}
++};
++}
++'''
++FIELDS=r'''
++    std::string weather_query_;
++    bool weather_search_=false,navigation_focus_=false;
++    uint32_t last_weather_revision_=0;
++'''
++METHODS=['HandleWeatherTap','HandleWeatherKey']
++EXERCISE=r'''
++    display.ClearFormLocked();display.reminder_alert_.active=false;display.quick_controls_open_.store(false);
++    auto& weather_setup=dashboard::WeatherSetup::Instance();weather_setup.Cancel();
++    display.product_page_=RawDisplay::ProductPage::Home;display.navigation_focus_=false;save("home-borderless");
++    for(int y:{296,464,664})for(int x=40;x<216;++x)assert(display.portrait_fb_[y*60+x/8] & (0x80>>(x%8)));
++    display.navigation_focus_=true;display.navigation_index_=2;save("home-key-focus");
++    display.navigation_focus_=false;display.product_page_=RawDisplay::ProductPage::More;save("settings-borderless");
++    display.product_page_=RawDisplay::ProductPage::Weather;dashboard::Weather none;
++    dashboard::DashboardData::GetInstance().SetWeather(none);save("weather-unconfigured");
++    assert(display.HandleWeatherTap(40,640));assert(display.edit_target_==RawDisplay::EditTarget::WeatherCity);
++    assert(display.editor_.Insert("上海"));display.FinishEditorLocked(true);save("weather-searching");
++    dashboard::WeatherJob job;assert(weather_setup.Take(job) && job.query=="上海");
++    std::vector<dashboard::WeatherPlace> cities={{1796236,"上海","上海市 · 中国",31.22,121.46},
++        {42,"同名地点","另一个行政区",20,40}};
++    weather_setup.Searched(job.generation,cities,nullptr);save("weather-city-results");
++    assert(display.HandleWeatherTap(50,200));assert(weather_setup.Take(job) && !job.search);
++    save("weather-saving");assert(display.HandleWeatherTap(40,700));assert(display.product_page_==RawDisplay::ProductPage::Weather);
++    weather_setup.Saved(job.generation,false);save("weather-save-error");
++    assert(display.HandleWeatherTap(40,640));display.FinishEditorLocked(true);assert(weather_setup.Take(job));
++    weather_setup.Searched(job.generation,cities,nullptr);assert(display.HandleWeatherTap(50,200));assert(weather_setup.Take(job));
++    weather_setup.Saved(job.generation,true);
++    dashboard::Weather live;live.valid=true;live.updated_epoch=static_cast<uint32_t>(preview_epoch);live.temperature_c=23;
++    live.feels_like_c=25;live.humidity=64;live.wind_kmh=9;live.request_state=dashboard::RequestState::Succeeded;
++    dashboard::CopyText(live.location,sizeof(live.location),"上海");dashboard::CopyText(live.condition,sizeof(live.condition),"多云");
++    dashboard::DashboardData::GetInstance().SetWeather(live);save("weather-live-fixture");
++    assert(!display.weather_search_);assert(display.HandleWeatherTap(260,640));assert(dashboard::DashboardService::GetInstance().refreshes);
++    live.from_cache=true;live.updated_epoch-=7200;live.request_state=dashboard::RequestState::Offline;
++    dashboard::DashboardData::GetInstance().SetWeather(live);dashboard::DashboardData::GetInstance().UpdateFreshness(preview_epoch);save("weather-offline-cache");
++    assert(display.HandleWeatherTap(40,640));display.FinishEditorLocked(true);assert(weather_setup.Take(job));
++    assert(display.HandleWeatherTap(40,700));weather_setup.Searched(job.generation,cities,nullptr);
++    assert(weather_setup.Snapshot().state==dashboard::WeatherSetupState::Idle);assert(weather_setup.Snapshot().results.empty());
++    std::puts("Weather UI: real editor/search/selection/cancel/save failure, stale cache and HTTP outside UI lock passed");
++'''
+diff --git a/tools/render_ui_preview.py b/tools/render_ui_preview.py
+index 576a197..b9ac908 100644
+--- a/tools/render_ui_preview.py
++++ b/tools/render_ui_preview.py
+@@ -18,6 +18,7 @@ import tempfile
+ from preview_input_support import HEADERS, FIELDS, METHODS, EXERCISE
+ import preview_mono_support as mono
+ import preview_chat_support as chat
++import preview_weather_support as weather
+ HEADERS += mono.HEADERS
+ FIELDS += mono.FIELDS
+ METHODS += mono.METHODS
+@@ -26,6 +27,10 @@ HEADERS += chat.HEADERS
+ FIELDS += chat.FIELDS
+ METHODS += chat.METHODS
+ EXERCISE += chat.EXERCISE
++HEADERS += weather.HEADERS
++FIELDS += weather.FIELDS
++METHODS += weather.METHODS
++EXERCISE += weather.EXERCISE
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ SOURCE = ROOT / 'main/display/raw_display.cc'
+@@ -372,12 +377,12 @@ def main() -> None:
+     with tempfile.TemporaryDirectory(prefix='miaoink-ui-') as temporary:
+         host = Path(temporary) / 'preview.cc'
+         executable = Path(temporary) / 'preview'
+-        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()))
++        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()+'\n'+(ROOT/'main/display/weather_view.cc').read_text()))
+         cjson = ROOT / "managed_components/espressif__cjson/cJSON"
+         subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson), "-o", str(Path(temporary)/"cjson.o")], check=True)
+         subprocess.run([compiler, '-std=c++17', '-O1', '-DFONTPACK_HOST_TEST', '-x', 'c++', '-I', str(ROOT / 'main'),
+                         '-I', str(cjson), str(host), str(ROOT / 'main/display/font/ai_ui_assets.c'),
+-                        str(ROOT / 'main/dashboard/dashboard_data.cc'),
++                        str(ROOT / 'main/dashboard/dashboard_data.cc'), str(ROOT / 'main/dashboard/weather_provider.cc'),
+                         str(ROOT / 'main/display/font/raw_font.cc'),
+                         str(ROOT / 'main/display/font/font_loader.c'),
+                         str(ROOT / 'main/input/text_input.cc'), str(ROOT / 'main/network/setup_model.cc'), str(ROOT / 'main/xiaozhi/conversation.cc'), str(ROOT / 'main/notes/note_store.cc'), str(ROOT / 'main/reminders/reminder_store.cc'), '-x', 'none', str(Path(temporary)/'cjson.o'), '-o', str(executable)], check=True)
+diff --git a/tools/tests/weather_contract.cc b/tools/tests/weather_contract.cc
+new file mode 100644
+index 0000000..9d16688
+--- /dev/null
++++ b/tools/tests/weather_contract.cc
+@@ -0,0 +1,53 @@
++#include "dashboard/weather_provider.h"
++#include "input/text_input.h"
++#include <cJSON.h>
++#include <cassert>
++#include <cstdio>

@@ -1,0 +1,8 @@
+diff --git a/tools/tests/weather_stubs/settings.h b/tools/tests/weather_stubs/settings.h
+new file mode 100644
+index 0000000..5761018
+--- /dev/null
++++ b/tools/tests/weather_stubs/settings.h
+@@ -0,0 +1,2 @@
++#pragma once
++#include "platform.h"

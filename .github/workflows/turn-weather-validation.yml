@@ -7,33 +7,133 @@ permissions:
   contents: read
 env:
   PYTHONDONTWRITEBYTECODE: '1'
+concurrency:
+  group: turn-weather-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  sources:
+  prepare:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Verify and apply the tested source patch
+        run: python3 .ci/apply.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turn-weather-overlay
+          path: turn-weather-overlay.zip
+          retention-days: 3
+  host:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: turn-weather-overlay
+      - run: unzip -o turn-weather-overlay.zip
       - uses: actions/checkout@v4
         with:
           repository: DaveGamble/cJSON
           ref: v1.7.19
           path: managed_components/espressif__cjson/cJSON
           persist-credentials: false
-      - name: Baseline regression checks
+      - run: python3 -m pip install Pillow
+      - name: Turn recovery, weather and all product regressions
         run: |
-          python3 tools/check_ai_contract.py
-          python3 tools/check_chat_history.py
-          python3 tools/check_dashboard_contract.py
-          python3 tools/check_ui_contract.py
-          python3 tools/check_sleep_contract.py
-      - name: Export host dependency
+          mkdir -p validation
+          failed=0
+          for name in weather_contract sleep_contract transport_health chat_history ui_icon_sources audio_playback mono_controls input_network ssid_store ui_contract ai_contract dashboard_contract reminders_contract system_tools memory_contract input_transport volume_callbacks serial_write recorder refresh_policy reminder_chime; do
+            python3 "tools/check_${name}.py" > "validation/${name}.log" 2>&1 || failed=1
+            tail -n 15 "validation/${name}.log"
+          done
+          exit "$failed"
+      - name: Clang weather, history, bookmark and sleep portability
+        run: |
+          mkdir -p validation
+          failed=0
+          for name in weather_contract chat_history mono_controls sleep_contract; do
+            CXX=clang++ python3 "tools/check_${name}.py" > "validation/clang-${name}.log" 2>&1 || failed=1
+            tail -n 15 "validation/clang-${name}.log"
+          done
+          exit "$failed"
+      - name: Experimental BLE mock contract
+        run: WHITEAI_TEST_BLE=1 python3 tools/check_mono_controls.py
+      - name: Actual font and page routing previews
         if: always()
-        run: zip -j cjson-host.zip managed_components/espressif__cjson/cJSON/cJSON.c managed_components/espressif__cjson/cJSON/cJSON.h
+        run: |
+          mkdir -p validation
+          python3 tools/render_ui_preview.py --out build/turn-weather-preview > validation/render.log 2>&1
+      - name: Public weather HTTPS connectivity probe (not a device test)
+        continue-on-error: true
+        run: python3 .ci/weather_live.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: cjson-host
-          path: cjson-host.zip
-          retention-days: 1
+          name: turn-weather-host-validation
+          path: |
+            validation/
+            validation-source.json
+            build/turn-weather-preview/**/*.png
+          retention-days: 7
+  firmware:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: turn-weather-overlay
+      - run: python3 -m zipfile -e turn-weather-overlay.zip .
+      - name: Full ESP32-S3 build and audio memory budget
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          idf.py build 2>&1 | tee firmware-build.log
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: turn-weather-build-validation
+          path: |
+            firmware-build.log
+            build/delivery_manifest.json
+            build/audio_memory.json
+            validation-source.json
+          retention-days: 7
+  publish:
+    needs: [host, firmware]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/turn-weather
+          fetch-depth: 2
+      - name: Verify branch has not moved
+        run: test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: turn-weather-overlay
+      - name: Commit only verified product sources on feature branch
+        run: |
+          unzip -o turn-weather-overlay.zip
+          python3 -c 'import json,hashlib,pathlib; m=json.load(open("validation-source.json")); assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()==s for p,s in m["files"].items())'
+          git add main components tools docs
+          git diff --cached --check
+          git config user.name 'WhiteAI validation'
+          git config user.email '116695909+446599@users.noreply.github.com'
+          git commit -m 'feat: recover stuck turns, simplify navigation and add weather [skip ci]' -m 'Host regressions, actual font previews and full ESP-IDF 6.0.1 build passed. Physical audio, cloud speech, radio and sleep behavior require device validation.'
+          git push origin HEAD:codex/turn-weather

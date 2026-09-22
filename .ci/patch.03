@@ -1,0 +1,125 @@
++        if(ok){weather.valid=true;weather.request_state=RequestState::Succeeded;
++            CopyText(weather.location,sizeof(weather.location),weather_location_.empty()?"自定义":weather_location_.c_str());
++            CopyText(weather.condition,sizeof(weather.condition),WeatherCondition(static_cast<int>(code)));weather.temperature_c=std::lround(temperature);
++            weather.feels_like_c=std::lround(feels);weather.humidity=std::lround(humidity);weather.wind_kmh=std::lround(wind);weather.updated_epoch=TimestampNow();}
++        cJSON_Delete(root);if(!ok)return false;
+     }
+-    cJSON_Delete(root);
+-    return ok;
++    DashboardData::GetInstance().SetWeather(weather);SaveWeatherSnapshot(weather);
++    ESP_LOGI(kTag,"weather snapshot updated");return true;
+ }
+ 
+ bool DashboardService::FetchQuota() {
+@@ -386,10 +387,20 @@ void DashboardService::Run() {
+         if(power::Locked()){sleep_ready_.store(true);vTaskDelay(pdMS_TO_TICKS(100));continue;}
+         sleep_ready_.store(false);
+         power::Activity activity;if(!activity){vTaskDelay(pdMS_TO_TICKS(20));continue;}
++        // Defer optional HTTP work while a foreground voice turn is active.
++        // Reuse the provider task; do not allocate another internal task stack.
++        const auto turn=xiaozhi::Conversation::GetInstance().State();
++        if(turn==xiaozhi::TurnState::Connecting || turn==xiaozhi::TurnState::Listening ||
++           turn==xiaozhi::TurnState::Transcribing || turn==xiaozhi::TurnState::Thinking ||
++           turn==xiaozhi::TurnState::Speaking) {
++            activity.Release();vTaskDelay(pdMS_TO_TICKS(1000));continue;
++        }
++        ServiceWeatherSetup();
+         const int64_t now_ms = esp_timer_get_time() / 1000;
+         auto& data = DashboardData::GetInstance();
+         data.UpdateFreshness(TimestampNow());
+-        const bool requested = refresh_requested_.exchange(false);
++        const bool requested = refresh_requested_.exchange(false) &&
++            (last_refresh_ms_==0 || now_ms-last_refresh_ms_>=60000);
+         const bool network_due = last_network_check_ms_ == 0 ||
+                                  now_ms - last_network_check_ms_ >= kNetworkCheckIntervalMs ||
+                                  requested;
+diff --git a/main/dashboard/dashboard_service.h b/main/dashboard/dashboard_service.h
+index 4503bdf..d935aea 100644
+--- a/main/dashboard/dashboard_service.h
++++ b/main/dashboard/dashboard_service.h
+@@ -36,6 +36,8 @@ private:
+     void SaveQuotaSnapshot(const Quota& quota);
+     bool EnsureNetwork();
+     bool FetchWeather();
++    void ServiceWeatherSetup();
++    bool FetchJson(const std::string& url, std::string& body);
+     bool FetchQuota();
+     void PublishNetwork(const char* text);
+ 
+@@ -47,6 +49,7 @@ private:
+     std::string quota_url_;
+     std::string quota_token_;
+     uint32_t refresh_interval_ms_ = 10U * 60U * 1000U;
++    bool configured_place_ = false;
+     bool network_attempted_ = false;
+     bool network_ready_ = false;
+     int64_t last_network_check_ms_ = 0;
+diff --git a/main/dashboard/weather_provider.cc b/main/dashboard/weather_provider.cc
+new file mode 100644
+index 0000000..15dba17
+--- /dev/null
++++ b/main/dashboard/weather_provider.cc
+@@ -0,0 +1,168 @@
++#include "weather_provider.h"
++#include "input/text_input.h"
++#include <cJSON.h>
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++#include <memory>
++#include <set>
++namespace dashboard {
++namespace {
++using Json=std::unique_ptr<cJSON,decltype(&cJSON_Delete)>;
++bool Text(const std::string& s,size_t limit,bool empty=false) {
++    return (empty || !s.empty()) && s.size()<=limit && input::ValidUtf8(s) &&
++        std::none_of(s.begin(),s.end(),[](unsigned char c){return c<32 || c==127;});
++}
++Json Parse(const std::string& json) {
++    if(json.size()>16384 || json.find('\0')!=std::string::npos)return Json(nullptr,cJSON_Delete);
++    // cJSON stores strings as C strings: never accept an encoded NUL prefix.
++    for(size_t i=0;i<json.size();++i)if(json[i]=='\\' && i+1<json.size()) {
++        if(json.compare(i+1,5,"u0000")==0)return Json(nullptr,cJSON_Delete);
++        ++i;
++    }
++    return Json(cJSON_ParseWithLengthOpts(json.c_str(),json.size()+1,nullptr,true),cJSON_Delete);
++}
++const cJSON* Item(const cJSON* p,const char* key) {return cJSON_IsObject(p)?cJSON_GetObjectItemCaseSensitive(p,key):nullptr;}
++bool Number(const cJSON* p,const char* key,double min,double max,double& out) {
++    const auto* v=Item(p,key);if(!cJSON_IsNumber(v)||!std::isfinite(v->valuedouble)||v->valuedouble<min||v->valuedouble>max)return false;
++    out=v->valuedouble;return true;
++}
++std::string String(const cJSON* p,const char* key) {const auto* v=Item(p,key);return cJSON_IsString(v)?v->valuestring:"";}
++const char* Condition(int code) {
++    switch(code){case 0:return "晴";case 1:return "晴间多云";case 2:return "多云";case 3:return "阴";
++    case 45:case 48:return "雾";case 51:case 53:case 55:return "毛毛雨";case 56:case 57:return "冻毛毛雨";
++    case 61:return "小雨";case 63:return "中雨";case 65:return "大雨";case 66:case 67:return "冻雨";
++    case 71:return "小雪";case 73:return "中雪";case 75:return "大雪";case 77:return "雪粒";
++    case 80:case 81:case 82:return "阵雨";case 85:case 86:return "阵雪";case 95:return "雷雨";
++    case 96:case 99:return "雷雨冰雹";default:return nullptr;}
++}
++}
++const char* WeatherCondition(int code){return Condition(code);}
++bool ValidWeatherPlace(const WeatherPlace& p){return p.id && Text(p.name,90)&&Text(p.region,180,true)&&
++    std::isfinite(p.latitude)&&p.latitude>=-90&&p.latitude<=90&&std::isfinite(p.longitude)&&p.longitude>=-180&&p.longitude<=180;}
++std::string WeatherSearchUrl(const std::string& query) {
++    if(!Text(query,90))return {};
++    std::string encoded;constexpr char hex[]="0123456789ABCDEF";
++    for(unsigned char c:query) {
++        if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c=='.')encoded+=char(c);
++        else {encoded+='%';encoded+=hex[c>>4];encoded+=hex[c&15];}
++    }
++    return "https://geocoding-api.open-meteo.com/v1/search?name="+encoded+"&count=5&language=zh&format=json";
++}
++std::string WeatherForecastUrl(const WeatherPlace& p) {
++    if(!ValidWeatherPlace(p))return {};
++    char url[512];std::snprintf(url,sizeof(url),"https://api.open-meteo.com/v1/forecast?latitude=%.5f&longitude=%.5f&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code&temperature_unit=celsius&wind_speed_unit=kmh&timeformat=unixtime&forecast_days=1",p.latitude,p.longitude);
++    return url;
++}
++bool ParseWeatherPlaces(const std::string& json,std::vector<WeatherPlace>& places) {
++    const auto root=Parse(json);if(!cJSON_IsObject(root.get())||cJSON_IsTrue(Item(root.get(),"error")))return false;
++    const auto* rows=Item(root.get(),"results");if(rows && !cJSON_IsArray(rows))return false;
++    std::vector<WeatherPlace> loaded;std::set<uint32_t> ids;
++    if(cJSON_GetArraySize(rows)>100)return false;
++    for(int i=0;rows && i<cJSON_GetArraySize(rows) && loaded.size()<5;++i) {

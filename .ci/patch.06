@@ -1,0 +1,75 @@
+             case EditTarget::NoteBody: draft_dirty_|=draft_note_.text!=editor_.Text();draft_note_.text=editor_.Text();break;
+             case EditTarget::NoteSearch: notes_query_=editor_.Text();notes_page_=navigation_index_=0;break;
++            case EditTarget::WeatherCity:
++                if(!dashboard::WeatherSetup::Instance().Search(editor_.Text())) {form_message_="请输入城市，或稍后重试";return;}
++                weather_query_=editor_.Text();weather_search_=true;navigation_index_=0;break;
+             case EditTarget::ChatMessage: chat_draft_=editor_.Text();break;
+             default: break;
+         }
+@@ -235,7 +240,7 @@ void RawDisplay::DrawProductTextEntryLocked() {
+     switch(edit_target_) {
+         case EditTarget::WifiSsid:title="网络名称";break;case EditTarget::WifiPassword:title="Wi-Fi 密码";break;
+         case EditTarget::NoteTitle:title="笔记标题";break;case EditTarget::NoteProject:title="所属项目";break;
+-        case EditTarget::NoteBody:title="笔记正文";break;case EditTarget::NoteSearch:title="搜索笔记";break;case EditTarget::ChatMessage:title="文字提问";break;default:break;
++        case EditTarget::NoteBody:title="笔记正文";break;case EditTarget::NoteSearch:title="搜索笔记";break;case EditTarget::WeatherCity:title="搜索城市";break;case EditTarget::ChatMessage:title="文字提问";break;default:break;
+     }
+     DrawProductHeadingLocked(title,"输入");StrokeRoundRect(32,136,416,136,12,1);
+     auto visible=editor_.VisibleText(password_reveal_);visible.insert(editor_.Cursor(),"|");
+@@ -266,7 +271,7 @@ void RawDisplay::DrawProductTextEntryLocked() {
+     const auto& error=form_message_.empty() ? editor_.Error() : form_message_;
+     DrawProductLabelLocked(32,652,416,error.c_str(),ui_font_small);
+     button(32,688,200,48,"取消");button(248,688,200,48,edit_target_==EditTarget::ChatMessage ? "发送" : "完成");
+-    DrawProductControlRailLocked(editor_.Secret() ? "密码仅用于本机联网，不发送给 AI" : "全拼选字 / v 代替 ü / 按字节限制长度");
++    DrawProductControlRailLocked(editor_.Secret() ? "" : "全拼选字 · v = ü");
+ }
+ void RawDisplay::DrawProductWifiLocked(bool credentials) {
+     std::memset(portrait_fb_,0xff,portrait_size_);DrawProductStatusBarLocked();
+@@ -281,17 +286,18 @@ void RawDisplay::DrawProductWifiLocked(bool credentials) {
+             DrawText(32,280,"切换到 Wi-Fi 需要重启设备。",ui_font_small);
+             button(32,624,416,48,wifi_switch_confirm_ ? "确认切换并重启" : "切换到 Wi-Fi");
+         } else {
+-            DrawProductLabelLocked(32,176,416,"2.4 GHz 网络 / 选择后输入密码",ui_font_small);
++            DrawProductLabelLocked(32,176,416,"2.4 GHz",ui_font_small);
+             const int pages=std::max(1,(static_cast<int>(status.access_points.size())+4)/5);wifi_page_=std::clamp(wifi_page_,0,pages-1);
+             for(int row=0;row<5;++row) {
+                 const size_t index=wifi_page_*5+row;if(index>=status.access_points.size()) break;
+                 const auto& ap=status.access_points[index];char detail[64];
+                 std::snprintf(detail,sizeof(detail),"%d dBm / %s",ap.rssi,ap.security==network::Security::Open ? "开放网络" : ap.security==network::Security::Personal ? "需要密码" : "暂不支持");
+-                StrokeRoundRect(32,216+row*80,416,68,12,navigation_index_==row ? 2 : 1);
++                FillRect(48,282+row*80,384,1,true);
++                if(navigation_focus_ && navigation_index_==row) FillRect(32,248+row*80,8,2,true);
+                 DrawProductLabelLocked(48,224+row*80,384,ap.ssid.c_str(),ui_font_small);
+                 DrawProductLabelLocked(48,254+row*80,384,detail,ui_font_status);
+             }
+-            if(status.access_points.empty() && !busy) DrawProductLabelLocked(32,240,416,"点击扫描，或手动添加隐藏网络。",ui_font_small);
++            if(status.access_points.empty() && !busy) DrawProductLabelLocked(32,240,416,"未找到网络",ui_font_small);
+             button(32,624,132,48,busy ? "取消" : "扫描");button(174,624,132,48,"手动添加");
+             char page[32];std::snprintf(page,sizeof(page),"%d/%d 下一页",wifi_page_+1,pages);button(316,624,132,48,page);
+         }
+@@ -304,12 +310,12 @@ void RawDisplay::DrawProductWifiLocked(bool credentials) {
+     const std::string masked=selected_ap_.security==network::Security::Open ? "开放网络，无需密码" : wifi_password_.empty() ? "尚未填写" : std::string(wifi_password_.size(),'*');
+     DrawProductLabelLocked(48,316,384,masked.c_str(),ui_font_small);
+     if(wifi_manual_) button(32,368,416,48,selected_ap_.security==network::Security::Open ? "开放网络 · 点击改为加密" : "加密网络 · 点击改为开放");
+-    const std::string message=!form_message_.empty() ? form_message_ : status.ssid==selected_ap_.ssid ? status.message : "确认网络名称，输入密码后连接。";
++    const std::string message=!form_message_.empty() ? form_message_ : status.ssid==selected_ap_.ssid ? status.message : "";
+     const auto lines=raw_font::Paginate(message,416,0,2,[](uint32_t cp){return raw_font::Lookup(ui_font_small,cp).advance;});
+     for(size_t i=0;i<lines.lines.size();++i) DrawText(32,432+i*36,lines.lines[i].c_str(),ui_font_small);
+     if(status.ssid==selected_ap_.ssid && status.state==network::SetupState::Connected) DrawProductLabelLocked(32,510,416,status.ip.c_str(),ui_font_small);
+     button(32,560,416,64,status.state==network::SetupState::Saving ? "正在保存" : busy ? "取消连接" : "连接网络");
+-    button(32,648,416,64,"返回网络列表");DrawProductControlRailLocked("空格和大小写均按原样保留");
++    button(32,648,416,64,"返回网络列表");DrawProductControlRailLocked("");
+ }
+ void RawDisplay::DrawProductNoteComposeLocked() {
+     std::memset(portrait_fb_,0xff,portrait_size_);DrawProductStatusBarLocked();DrawProductHeadingLocked(draft_note_.id ? "编辑笔记" : "新建笔记","本地");
+@@ -322,7 +328,7 @@ void RawDisplay::DrawProductNoteComposeLocked() {
+     DrawProductLabelLocked(32,510,416,form_message_.empty() ? (draft_note_.raw_text.empty() ? "离线编辑，保存到 SD 卡" : "只修改整理版，归档原文保持不变") : form_message_.c_str(),ui_font_small);
+     StrokeRoundRect(32,560,416,64,12,1);DrawTextCentered(32,560,416,64,note_save_operation_ ? "正在保存" : "保存笔记",ui_font_small);
+     StrokeRoundRect(32,648,416,64,12,1);DrawTextCentered(32,648,416,64,"返回笔记目录",ui_font_small);
+-    DrawProductControlRailLocked("未保存修改会在退出前确认");
++    DrawProductControlRailLocked("");
+ }
+ void RawDisplay::DrawProductDiscardLocked() {
+     std::memset(portrait_fb_,0xff,portrait_size_);DrawProductStatusBarLocked();DrawProductHeadingLocked("放弃修改？","确认");
+@@ -330,5 +336,5 @@ void RawDisplay::DrawProductDiscardLocked() {
+     DrawText(32,288,"原有笔记与网络配置不会改变。",ui_font_small);
+     StrokeRoundRect(32,496,200,64,12,1);DrawTextCentered(32,496,200,64,"继续编辑",ui_font_small);

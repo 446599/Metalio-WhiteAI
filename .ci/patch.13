@@ -1,0 +1,129 @@
+-    if (!sent) HandleDisconnect(request.epoch);
++    if (!sent) HandleDisconnect(request.epoch,"mcp_send");
++}
++
++void Client::CheckTurnProgress(int64_t now_ms) {
++    std::lock_guard<std::mutex> lock(intent_mutex_);
++    auto& conversation=Conversation::GetInstance();
++    const auto state=conversation.State();
++    const bool busy=state==TurnState::Connecting || state==TurnState::Listening ||
++        state==TurnState::Transcribing || state==TurnState::Thinking || state==TurnState::Speaking;
++    const char* reason=nullptr;const char* message="等待超时，请重试";
++    if(connected_.load() && hello_started_ms_ && now_ms-hello_started_ms_>=10000 && !IsSessionReady()) {
++        reason="hello_timeout";message="小智未就绪，请重试";
++    } else if(uplink_failed_.load() && turn_in_flight_) {
++        reason="audio_send";message="发送失败，请重试";
++    } else if(busy && !turn_in_flight_ && !pending_action_.load() && !listen_requested_.load()) {
++        reason="orphan_turn";message="会话已中断，请重试";
++    } else if(task_deadline_ms_.load()>0 && now_ms>=task_deadline_ms_.load() && !ChatTask::Instance().ReadAll()) {
++        reason="task_unread";message="小智未读取任务，请检查 MCP";
++    } else if(turn_in_flight_ && turn_started_ms_ && now_ms-turn_started_ms_>=180000) {
++        reason="turn_limit";
++    } else if(turn_in_flight_ && response_started_ms_.load()>0) {
++        const int64_t limit=state==TurnState::Transcribing ? 20000 : 45000;
++        if(now_ms-response_started_ms_.load()>=limit){reason="response_timeout";if(conversation.Snapshot().transcript.empty())message="未收到识别结果，请重试";}
++    }
++    if(!reason)return;
++    InvalidateTransportLocked(reason);
++    if(busy)conversation.SetState(TurnState::Error,message);
++    PublishStatus("小智重连中");
+ }
+ 
+ void Client::Run() {
+@@ -819,14 +874,7 @@ void Client::Run() {
+         if (listen_requested_.load() && tick_ms - listen_started_ms_.load() >= 60000) {
+             (void)ListenStop();
+         }
+-        if(task_deadline_ms_.load()>0 && tick_ms>=task_deadline_ms_.load() && !ChatTask::Instance().ReadAll()) {
+-            (void)Abort();
+-            Conversation::GetInstance().SetState(TurnState::Error,"设备任务未读完，请检查 MCP；原文保留");
+-        }
+-        if (response_started_ms_.load() > 0 && tick_ms - response_started_ms_.load() >= 45000) {
+-            (void)Abort();
+-            Conversation::GetInstance().SetState(TurnState::Error, "等待 AI 超时，原文仍保留，可重试");
+-        }
++        CheckTurnProgress(tick_ms);
+         if (!enabled_) {
+             activity.Release();vTaskDelay(pdMS_TO_TICKS(5000));
+             continue;
+@@ -867,7 +915,7 @@ void Client::Run() {
+                     last_ping_ms_.store(now_ms);
+                 }
+             }
+-            if (disconnected) HandleDisconnect(epoch);
++            if (disconnected) HandleDisconnect(epoch,"health_check");
+         }
+         activity.Release();
+         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+diff --git a/main/xiaozhi/xiaozhi_client.h b/main/xiaozhi/xiaozhi_client.h
+index 475b0e3..b762591 100644
+--- a/main/xiaozhi/xiaozhi_client.h
++++ b/main/xiaozhi/xiaozhi_client.h
+@@ -67,7 +67,8 @@ private:
+     // keeps polling while the server waits for the binding code to be entered.
+     void ServiceActivation();
+     void HandleData(uint32_t epoch, const char* data, size_t length, bool binary);
+-    void HandleDisconnect(uint32_t epoch);
++    void HandleDisconnect(uint32_t epoch, const char* cause="transport", int error=0);
++    void CheckTurnProgress(int64_t now_ms);
+     void PublishStatus(const char* status);
+     void SendPendingAction();
+     bool SendText(const std::string& message);
+@@ -80,7 +81,7 @@ private:
+     // Closes the microphone side of a manual window without telling the server
+     // to stop: used when the utterance is already on its way.
+     void EndListenWindowLocked();
+-    void InvalidateTransportLocked();
++    void InvalidateTransportLocked(const char* cause="reset");
+ 
+     std::atomic<bool> started_{false},sleep_ready_{false};
+     std::atomic<bool> connected_{false};
+@@ -111,6 +112,11 @@ private:
+     std::atomic<bool> restore_requested_{false};
+     std::atomic<int64_t> listen_started_ms_{0};
+     std::atomic<int64_t> response_started_ms_{0};
++    // All times use monotonic milliseconds. A hard limit is independent of
++    // keepalives/emotion notifications and survives a lost response timer.
++    int64_t turn_started_ms_ = 0, hello_started_ms_ = 0;
++    std::atomic<uint32_t> uplink_packets_{0}, uplink_bytes_{0};
++    std::atomic<bool> uplink_failed_{false};
+     // A release or disconnect clears intent. Reconnect never opens the mic.
+     std::atomic<bool> listen_requested_{false};
+     std::atomic<uint32_t> json_events_logged_{0};
+diff --git a/tools/check_ai_contract.py b/tools/check_ai_contract.py
+index 93d6a2b..9140921 100644
+--- a/tools/check_ai_contract.py
++++ b/tools/check_ai_contract.py
+@@ -24,7 +24,7 @@ def main():
+     methods = ['BeginTextTask', 'CaptureHistory', 'SubmitText', 'SwitchChat', 'DeleteChat', 'ListenStart', 'ListenStop', 'Abort', 'RunQuickAction', 'SaveCapsule', 'RestoreCapsule',
+                'IsListening', 'IsSessionReady', 'EndListenWindowLocked',
+                'InvalidateTransportLocked', 'HandleDisconnect', 'SavePendingCapsule',
+-               'ConnectOnce', 'ReleaseTransport', 'SendPendingAction', 'HandleData']
++               'SendAudio', 'CheckTurnProgress', 'ConnectOnce', 'ReleaseTransport', 'SendPendingAction', 'HandleData']
+     # Extract non-void/bool methods with the same balanced parser used by previews.
+     parse_source = re.sub(r'^bool Client::', 'int Client::', source, flags=re.M)
+     bodies = []
+@@ -57,6 +57,9 @@ void xTaskNotifyGive(TaskHandle_t) {}
+ #define ESP_LOGW(...) ((void)0)
+ class WebSocket {
+ public:
++    bool binary_ok=true;
++    bool IsConnected(){return true;}
++    bool Send(const void*,size_t,bool){return binary_ok;}
+     std::function<void()> on_connected, on_disconnected;
+     std::function<void(int)> on_error;
+     std::function<void(const char*,size_t,bool)> on_data;
+@@ -323,6 +326,56 @@ int main() {
+     assert(!ChatTask::Instance().Read(read1.id,4999).ok);
+     auto stats=ChatTask::Instance().Stats();assert(stats.reads==2&&stats.failures==1&&stats.read==read1.next&&!ChatTask::Instance().ReadAll());
+     ChatTask::Instance().Cancel();
++    // A silent server must not leave Transcribing forever; no automatic replay.
++    connected();fake_us=1000000000;
++    assert(client.ListenStart());client.SendPendingAction();assert(audio.capture);
++    assert(client.ListenStop());client.SendPendingAction();
++    const auto sent_before_timeout=sent.size();
++    client.CheckTurnProgress(fake_us/1000+19999);
++    assert(conversation.Snapshot().state==TurnState::Transcribing);
++    client.CheckTurnProgress(fake_us/1000+20000);
++    assert(conversation.Snapshot().state==TurnState::Error && !client.turn_in_flight_);
++    assert(!client.connected_.load() && sent.size()==sent_before_timeout && !audio.capture);

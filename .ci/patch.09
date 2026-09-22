@@ -1,0 +1,131 @@
++    DrawProductControlRailLocked("");
+ }
+ 
+ void RawDisplay::DrawProductScreenLocked() {
+@@ -3119,6 +3123,7 @@ void RawDisplay::DrawProductScreenLocked() {
+     last_quick_revision_ = device::QuickControls::Instance().Revision();
+     last_reader_revision_ = reader::Service::Instance().Revision();
+     last_history_revision_ = chat::History::Instance().Revision();
++    last_weather_revision_ = dashboard::WeatherSetup::Instance().Revision();
+     AdvanceFormsLocked();
+     if (reminder_alert_.active) {
+         password_reveal_=false;quick_controls_open_.store(false);
+@@ -3146,6 +3151,7 @@ void RawDisplay::DrawProductScreenLocked() {
+         case ProductPage::Recorder: DrawProductRecorderLocked(); break;
+         case ProductPage::ChatList: DrawProductHistoryLocked(false); break;
+         case ProductPage::ChatDetail: DrawProductHistoryLocked(true); break;
++        case ProductPage::Weather: DrawProductWeatherLocked(); break;
+         case ProductPage::Notes: DrawProductNotesLocked(false); break;
+         case ProductPage::NoteDetail: DrawProductNotesLocked(true); break;
+         case ProductPage::WifiList: DrawProductWifiLocked(false); break;
+@@ -4462,7 +4468,8 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
+         notes::Writer::Instance().Snapshot().revision==last_writer_revision_ &&
+         device::QuickControls::Instance().Revision()==last_quick_revision_ &&
+         reader::Service::Instance().Revision()==last_reader_revision_ &&
+-        chat::History::Instance().Revision()==last_history_revision_) return;
++        chat::History::Instance().Revision()==last_history_revision_ &&
++        dashboard::WeatherSetup::Instance().Revision()==last_weather_revision_) return;
+     last_minute_ = tmv.tm_min;
+     last_drawn_battery_ = battery_percent_;
+     last_drawn_charging_ = charging_;
+diff --git a/main/display/raw_display.h b/main/display/raw_display.h
+index 4535b1b..32fd45e 100644
+--- a/main/display/raw_display.h
++++ b/main/display/raw_display.h
+@@ -96,9 +96,17 @@ private:
+         NoteCompose,
+         ChatList,
+         ChatDetail,
++        Weather,
+     };
+ 
+-    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch, ChatMessage };
++    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch, ChatMessage, WeatherCity };
++    void DrawProductWeatherLocked();
++    bool HandleWeatherTap(int x, int y);
++    bool HandleWeatherKey(HardwareKey key);
++    std::string weather_query_;
++    bool weather_search_=false;
++    uint32_t last_weather_revision_=0;
++    bool navigation_focus_=false;
+     void DrawProductHistoryLocked(bool detail);
+     bool HandleHistoryTap(int x,int y);
+     bool HandleHistoryKey(HardwareKey key);
+diff --git a/main/display/reader_view.cc b/main/display/reader_view.cc
+index 25b46e1..9867a9c 100644
+--- a/main/display/reader_view.cc
++++ b/main/display/reader_view.cc
+@@ -68,5 +68,5 @@ void RawDisplay::DrawProductReaderLocked(){
+     DrawTextCentered(32,632,416,32,book.busy?"正在读取…":page,ui_font_small);
+     StrokeRoundRect(32,672,200,48,12,1);DrawTextCentered(32,672,200,48,book.opened?"上一页":"刷新书库",ui_font_small);
+     StrokeRoundRect(248,672,200,48,12,1);DrawTextCentered(248,672,200,48,"下一页",ui_font_small);
+-    DrawProductControlRailLocked(book.message.empty()?"单本上限 256 KiB / HOME 返回":book.message.c_str());
++    DrawProductControlRailLocked(book.message.c_str());
+ }
+diff --git a/main/display/system_view.cc b/main/display/system_view.cc
+index a735806..9a30d30 100644
+--- a/main/display/system_view.cc
++++ b/main/display/system_view.cc
+@@ -20,6 +20,7 @@ RawDisplay::DeviceSnapshot RawDisplay::SystemSnapshot() {
+         case ProductPage::Recorder: name="recorder";break;
+         case ProductPage::AiResult: case ProductPage::AiSteps: name=voice_note_mode_ ? "voice_note" : "assistant";break;
+         case ProductPage::ChatList: case ProductPage::ChatDetail: name="chat_history";break;
++        case ProductPage::Weather: name="weather";break;
+         case ProductPage::NoteCompose: case ProductPage::Notes: case ProductPage::NoteDetail: name="notes";break;
+         case ProductPage::QuickNote: name="capsules";break;
+         case ProductPage::Reader: name="reader";break;
+@@ -93,7 +94,7 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
+             StrokeRoundRect((i ? 248 : 32),672,200,48,12,1);
+             DrawTextCentered((i ? 248 : 32),672,200,48,i ? "下一页" : "上一页",ui_font_small);
+         }
+-        DrawProductControlRailLocked("返回目录 / 语音整理，保留原文");
++        DrawProductControlRailLocked("");
+         return;
+     }
+     notes_pages_=std::max(1,(static_cast<int>(items.size())+notes_ui::kRows-1)/notes_ui::kRows);
+@@ -107,16 +108,16 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
+         if (!note.project.empty()) stamp=note.project+" / "+stamp;
+         if (note.done) stamp="已处理 / "+stamp;
+         const int y=notes_ui::kY+row*notes_ui::kPitch;
+-        if(navigation_index_==row)FillRoundRect(32,y+12,40,40,12,true);
+-        DrawProductIconLocked(lucide::Id::NotebookPen,38,y+18,28,navigation_index_!=row);
++        if(navigation_focus_ && navigation_index_==row)FillRect(38,y+60,24,2,true);
++        DrawProductIconLocked(lucide::Id::NotebookPen,38,y+18,28,true);
+         DrawProductLabelLocked(88,y+2,328,note.title.c_str(),ui_font_body);
+         DrawProductLabelLocked(88,y+44,328,stamp.c_str(),ui_font_small);
+         DrawProductChevronLocked(436,y+28);FillRect(88,y+notes_ui::kHeight-1,360,1,true);
+     }
+     if (items.empty()) {
+         DrawProductIconLocked(lucide::Id::NotebookPen,220,216,40,true);
+-        DrawTextCentered(32,300,416,48,notes::DeviceStore().Ready() ? (notes_query_.empty() ? "点击新建，或让小智记录" : "没有匹配的笔记") : "请检查 SD 卡",ui_font_body);
+-        DrawTextCentered(32,364,416,40,notes_query_.empty() ? "支持离线拼音输入" : "搜索中清空文字可显示全部",ui_font_small);
++        DrawTextCentered(32,300,416,48,notes::DeviceStore().Ready() ? (notes_query_.empty() ? "还没有笔记" : "没有匹配的笔记") : "请检查 SD 卡",ui_font_body);
++
+     }
+     const char* controls[]={"新建", "搜索", "下一页"};
+     const int xs[]={32,174,316};
+@@ -124,5 +125,5 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
+         StrokeRoundRect(xs[i],672,132,48,12,1);
+         DrawTextCentered(xs[i],672,132,48,controls[i],ui_font_small);
+     }
+-    DrawProductControlRailLocked("本地输入 / 按住 AI 键语音记录");
++    DrawProductControlRailLocked("");
+ }
+diff --git a/main/display/weather_view.cc b/main/display/weather_view.cc
+new file mode 100644
+index 0000000..4f4a40d
+--- /dev/null
++++ b/main/display/weather_view.cc
+@@ -0,0 +1,119 @@
++#include "raw_display.h"
++#include "dashboard/weather_provider.h"
++#include "dashboard/dashboard_service.h"
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++#include <ctime>
++
++bool RawDisplay::HandleWeatherTap(int x, int y) {
++    bool refresh=false;
++    {
++        DisplayLockGuard lock(this);

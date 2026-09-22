@@ -1,0 +1,125 @@
+     StrokeRoundRect(248,496,200,64,12,1);DrawTextCentered(248,496,200,64,"放弃修改",ui_font_small);
+-    DrawProductControlRailLocked("HOME / PREV 继续编辑");
++    DrawProductControlRailLocked("");
+ }
+diff --git a/main/display/quick_controls_view.cc b/main/display/quick_controls_view.cc
+index 4027b10..5602b26 100644
+--- a/main/display/quick_controls_view.cc
++++ b/main/display/quick_controls_view.cc
+@@ -125,8 +125,8 @@ void RawDisplay::DrawProductQuickControlsLocked() {
+         button(32,464,416,64,"锁屏休眠");
+         if(device::kBleDiscoveryEnabled)button(32,544,416,48,"实验 BLE 发现");
+         if(!state.message.empty())DrawProductLabelLocked(32,608,416,state.message.c_str(),ui_font_small);
+-        DrawProductLabelLocked(32,648,416,form_active_.load()?"当前草稿会保留":"电源键也可锁屏 / 闹钟仍会提醒",ui_font_small);
++
+     }
+     DrawTextCentered(32,688,416,48,"上滑收起",ui_font_small);
+-    DrawProductControlRailLocked("HOME 返回");
++    DrawProductControlRailLocked("");
+ }
+diff --git a/main/display/raw_display.cc b/main/display/raw_display.cc
+index b827941..513fd8e 100644
+--- a/main/display/raw_display.cc
++++ b/main/display/raw_display.cc
+@@ -1,5 +1,6 @@
+ #include "power/sleep_service.h"
+ #include "raw_display.h"
++#include "dashboard/weather_provider.h"
+ #include "chat/history_service.h"
+ #include "system/quick_controls.h"
+ #include "input/gesture.h"
+@@ -697,11 +698,13 @@ void RawDisplay::ShowAiConversation() {
+ void RawDisplay::HandleHomeTap(int x, int y) {
+     if(power::Locked())return;
+     power::Touch(esp_timer_get_time()/1000);
++    { DisplayLockGuard lock(this); navigation_focus_=false; }
+     if (HandleReminderTap(x,y)) return;
+     if (HandleQuickTap(x,y)) return;
+     if (HandleHistoryTap(x,y)) return;
+     if (HandleSetupTap(x,y)) return;
+     if (HandleReaderTap(x,y)) return;
++    if (HandleWeatherTap(x,y)) return;
+     enum class Action { None, Gray4, PaperMono, PaperText, AnimDu, AnimFc, PaperPage };
+     Action action = Action::None;
+     int ai_action = -1;
+@@ -839,6 +842,7 @@ void RawDisplay::HandleHomeTap(int x, int y) {
+                     }
+                     break;
+                 }
++                case ProductPage::Weather:
+                 case ProductPage::ChatList:
+                 case ProductPage::ChatDetail:
+                 case ProductPage::WifiList:
+@@ -949,10 +953,12 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
+     if(power::Locked())return false;
+     power::Touch(esp_timer_get_time()/1000);
+     if (reminders::Service::Instance().IsActive()) return true;
++    { DisplayLockGuard lock(this); if(key==HardwareKey::Next || key==HardwareKey::Previous) navigation_focus_=true; }
+     if (HandleQuickKey(key)) return true;
+     if (HandleHistoryKey(key)) return true;
+     if (HandleSetupKey(key)) return true;
+     if (HandleReaderKey(key)) return true;
++    if (HandleWeatherKey(key)) return true;
+     bool scan_wifi = false;
+     bool open_controls = false;
+     bool restore_recent_capsule = false;
+@@ -1117,7 +1123,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
+                                 ClearFormLocked(); wifi_page_=0; wifi_switch_confirm_=false;
+                                 set_page(ProductPage::WifiList); scan_wifi=true; break;
+                             case 1: set_page(ProductPage::Workbench); break;
+-                            case 2: refresh_tap = true; break;
++                            case 2: weather_search_=false; set_page(ProductPage::Weather); break;
+                             case 3: set_page(ProductPage::Settings); break;
+                             default:
+                                 open_controls=true; break;
+@@ -1618,6 +1624,7 @@ void RawDisplay::FrameDumpTask() {
+                                 case ProductPage::Recorder: page_name = "recorder"; break;
+                                 case ProductPage::ChatList: page_name = "chat_history"; break;
+                                 case ProductPage::ChatDetail: page_name = "chat_detail"; break;
++                                case ProductPage::Weather: page_name = "weather"; break;
+                                 case ProductPage::Notes: page_name = "notes"; break;
+                                 case ProductPage::NoteDetail: page_name = "note_detail"; break;
+                                 case ProductPage::WifiList: page_name = "wifi_list"; break;
+@@ -2583,10 +2590,11 @@ void RawDisplay::DrawProductIconLocked(lucide::Id id, int x, int y, int size, bo
+ 
+ void RawDisplay::DrawProductIconRowLocked(int y, lucide::Id icon, const char* title,
+                                          const char* detail, bool selected) {
+-    if (selected) FillRoundRect(32,y+8,40,40,12,true);
+-    DrawProductIconLocked(icon,38,y+14,28,!selected);
+-    DrawProductLabelLocked(88,y,328,title,ui_font_body);
+-    DrawProductLabelLocked(88,y+34,328,detail,ui_font_small);
++    DrawProductIconLocked(icon,38,y+14,28,true);
++    const bool has_detail=detail && detail[0];
++    DrawProductLabelLocked(88,y+(has_detail?0:12),328,title,ui_font_body);
++    if(has_detail) DrawProductLabelLocked(88,y+34,328,detail,ui_font_small);
++    if(selected && navigation_focus_) FillRect(88,y+64,24,2,true);
+     DrawProductChevronLocked(436,y+22);
+     FillRect(88,y+kUiRowHeight-1,360,1,true);
+ }
+@@ -2654,11 +2662,13 @@ void RawDisplay::DrawProductStatusBarLocked() {
+ void RawDisplay::DrawProductControlRailLocked(const char* context) {
+     // One passive line. The capacitive cover keys and BOOT retain their routes;
+     // there are no on-screen footer buttons or invisible footer hit targets.
+-    FillRect(kUiInset, kUiRailY, kUiContentWidth, 1, true);
++    // No permanent help rail on otherwise self-explanatory pages.
+     const bool notice = !quick_controls_open_.load() && !form_active_.load() && product_page_!=ProductPage::Reader && notification_text_[0] != '\0' &&
+                         notification_deadline_ms_ > esp_timer_get_time() / 1000;
+     const char* hint = notice ? notification_text_ :
+-                       (context ? context : "HOME 首页 / PREV 返回 / NEXT 下一项");
++                       (context ? context : "");
++    if(!hint[0])return;
++    FillRect(kUiInset, kUiRailY, kUiContentWidth, 1, true);
+     DrawProductLabelLocked(kUiInset, kUiRailY + 10, kUiContentWidth, hint, ui_font_small);
+ }
+ 
+@@ -2699,7 +2709,7 @@ void RawDisplay::DrawProductHomeLocked() {
+         std::strcmp(snapshot.ai_status,"请绑定设备")==0 ? "请绑定设备" : "按住 AI 键说话"};
+     for (int i = 0; i < 4; ++i) {
+         const int x = kUiHomeX[i % 2], y = kUiHomeY[i / 2];
+-        StrokeRoundRect(x, y, kUiHomeW, kUiHomeH, 16, navigation_index_ == i ? 3 : 1);
++        if(navigation_focus_ && navigation_index_==i) FillRect(x+20,y+101,24,2,true);
+         if(i==2)DrawProductIconLocked(lucide::Id::NotebookPen,x+20,y+16,40,true);
+         else DrawProductAppIconLocked(i, x + 20, y + 16);
+         DrawProductLabelLocked(x + 20, y + 64, kUiHomeW - 40, names[i], ui_font_body);
+@@ -2708,7 +2718,7 @@ void RawDisplay::DrawProductHomeLocked() {
+     const char* nav[] = {"应用目录", "设备选项"};
