@@ -68,10 +68,19 @@ int main(int argc,char** argv){
  test_commit_ok=false;CHECK(!settings.SetAlerts(true,false));CHECK(!settings.RingEnabled() && settings.VibrationEnabled());test_commit_ok=true;
  CHECK(settings.SetVolume(500));CHECK(settings.Snapshot().volume==100);
  CHECK(settings.SetVolume(-50));CHECK(settings.Snapshot().volume==0);
+#if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
  xiaozhi::AudioSession::GetInstance().stats.capturing=true;CHECK(!settings.ScanBluetooth());xiaozhi::AudioSession::GetInstance().stats.capturing=false;
  test_task_ok=false;CHECK(!settings.ScanBluetooth());CHECK(!settings.Snapshot().ble_busy);test_task_ok=true;
  CHECK(settings.ScanBluetooth());CHECK(!settings.ScanBluetooth());settings.CancelBluetooth();RunTasks();CHECK(settings.Snapshot().ble_cancelled && settings.Snapshot().nearby.empty());
  CHECK(settings.ScanBluetooth());RunTasks();CHECK(settings.Snapshot().ble_ok && settings.Snapshot().nearby.size()==1);
+#else
+ CHECK(!device::kBleDiscoveryEnabled);
+ const auto pending_tasks=tasks.size();const auto scans=GetHAL().scan_calls;
+ CHECK(!settings.ScanBluetooth());CHECK(!settings.ScanBluetooth());settings.CancelBluetooth();RunTasks();
+ CHECK(!settings.Snapshot().ble_busy && !settings.Snapshot().ble_ok && settings.Snapshot().nearby.empty());
+ CHECK(tasks.size()==pending_tasks && GetHAL().scan_calls==scans);
+ CHECK(settings.Snapshot().message.find("停用")!=std::string::npos);
+#endif
  // Actual bounded book service reads host files, creates pages and NVS bookmarks.
  std::ofstream(folder/"chapter.txt")<<std::string(3000,'A');std::ofstream(folder/"ignore.pdf")<<"not txt";
  auto& books=reader::Service::Instance();CHECK(books.List());CHECK(!books.List());RunTasks();CHECK(books.Get().files.size()==1);

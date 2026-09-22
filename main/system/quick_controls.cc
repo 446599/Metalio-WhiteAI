@@ -60,6 +60,12 @@ bool QuickControls::SetAlerts(bool ring,bool vibration){
     ++state_.revision;return error==ESP_OK;
 }
 bool QuickControls::ScanBluetooth(){
+#if !defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) || !CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
+    std::lock_guard<std::mutex> lock(mutex_);
+    state_.message="BLE 发现已停用，优先保障语音与铃声";
+    state_.ble_busy=false;state_.ble_ok=false;state_.nearby.clear();++state_.revision;
+    return false;
+#else
     const auto stats=xiaozhi::AudioSession::GetInstance().Stats();
     const auto turn=xiaozhi::Conversation::GetInstance().Snapshot().state;
     const bool speech=turn!=xiaozhi::TurnState::Idle && turn!=xiaozhi::TurnState::Done && turn!=xiaozhi::TurnState::Error;
@@ -75,11 +81,13 @@ bool QuickControls::ScanBluetooth(){
         state_.ble_busy=false;state_.message="内存不足，蓝牙扫描未启动";++state_.revision;return false;
     }
     return true;
+#endif
 }
 void QuickControls::CancelBluetooth(){
     std::lock_guard<std::mutex> lock(mutex_);
     if(state_.ble_busy){cancel_scan_.store(true);state_.message="正在停止蓝牙扫描";++state_.revision;}
 }
+#if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
 void QuickControls::ScanTask(void* arg){
     {
         auto& self=*static_cast<QuickControls*>(arg);
@@ -97,4 +105,5 @@ void QuickControls::ScanTask(void* arg){
     }
     Application::GetInstance().RequestStatusUpdate(true);vTaskDelete(nullptr);
 }
+#endif
 } // namespace device

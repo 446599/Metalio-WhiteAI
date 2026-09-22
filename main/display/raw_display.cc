@@ -1438,7 +1438,7 @@ void RawDisplay::FrameDumpTask() {
                         const auto& client = xiaozhi::Client::GetInstance();
                         stats.transport_connected = client.IsConnected();
                         stats.session_ready = client.IsSessionReady();
-                        char response[512];
+                        char response[768];
                         const int size = std::snprintf(
                             response, sizeof(response),
                             "@@XIAOZHI_STATS frames_sent=%lu send_err=%lu recv=%lu dropped=%lu "
@@ -1446,7 +1446,8 @@ void RawDisplay::FrameDumpTask() {
                             "peak=%d up=%d down=%d out=%d frame_ms=%d cap=%d play=%d "
                             "enc=%d dec=%d gated=%lu opens=%lu params=%d ws=%d sess=%d "
                             "enabled=%d ver=%d "
-                            "cap_stack=%lu play_stack=%lu heap=%lu psram=%lu reset=%s\n",
+                            "cap_stack=%lu play_stack=%lu heap=%lu psram=%lu reset=%s "
+                            "play_tts_stack=%lu play_tts_n=%lu play_alloc_fail=%lu play_need=%lu largest=%lu\n",
                             static_cast<unsigned long>(stats.frames_sent),
                             static_cast<unsigned long>(stats.send_errors),
                             static_cast<unsigned long>(stats.packets_received),
@@ -1469,8 +1470,13 @@ void RawDisplay::FrameDumpTask() {
                             static_cast<unsigned long>(stats.playback_stack_free),
                             static_cast<unsigned long>(stats.internal_heap_free),
                             static_cast<unsigned long>(stats.psram_free),
-                            ResetReasonName(esp_reset_reason()));
-                        if (size > 0) {
+                            ResetReasonName(esp_reset_reason()),
+                            static_cast<unsigned long>(stats.playback_tts_stack_free),
+                            static_cast<unsigned long>(stats.playback_tts_stack_samples),
+                            static_cast<unsigned long>(stats.playback_create_failures),
+                            static_cast<unsigned long>(stats.playback_stack_bytes),
+                            static_cast<unsigned long>(stats.internal_largest_free));
+                        if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
                             (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
                         }
                     } else if (strcasecmp(command, "RECORDER_STATE?") == 0) {

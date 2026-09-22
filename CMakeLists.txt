@@ -41,3 +41,23 @@ add_custom_target(delivery-manifest ALL
     COMMENT "Validating flash boundaries and writing delivery hashes"
     VERBATIM)
 add_dependencies(flash delivery-manifest)
+
+# Flash capacity alone does not protect audio: BLE IRAM consumes the same
+# internal RAM that FreeRTOS needs for contiguous capture/playback stacks.
+if(NOT CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY)
+    add_custom_target(audio-memory-budget ALL
+        COMMAND "${delivery_python}" "${CMAKE_SOURCE_DIR}/tools/check_audio_memory_budget.py"
+            --elf "${delivery_build_dir}/${PROJECT_NAME}.elf"
+            --sdkconfig "${SDKCONFIG}"
+            --report "${delivery_build_dir}/audio_memory.json"
+        DEPENDS app
+        BYPRODUCTS "${delivery_build_dir}/audio_memory.json"
+        COMMENT "Checking linked IRAM/DRAM audio headroom"
+        VERBATIM)
+    add_dependencies(delivery-manifest audio-memory-budget)
+    if(TARGET app-flash)
+        add_dependencies(app-flash audio-memory-budget)
+    endif()
+else()
+    message(WARNING "Experimental BLE discovery: not an audio-safe product build")
+endif()

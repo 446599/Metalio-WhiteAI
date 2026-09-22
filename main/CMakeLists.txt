@@ -35,7 +35,6 @@ set(SOURCES
             "xiaozhi/xiaozhi_audio.cc"
             "xiaozhi/xiaozhi_activation.cc"
             "hal/hal.cc"
-            "hal/hal_ble_scan.cc"
             "system_info.cc"
             "application.cc"
             "settings.cc"
@@ -43,6 +42,14 @@ set(SOURCES
             "device_state_event.cc"
             "main.cc"
             )
+
+# Do not merely defer nimble_port_init until the first tap: referenced
+# controller objects already occupy IRAM at link time and reduce DRAM heap.
+if(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY)
+    list(APPEND SOURCES "hal/hal_ble_scan.cc")
+else()
+    list(APPEND SOURCES "hal/hal_ble_unavailable.cc")
+endif()
 
 set(INCLUDE_DIRS
             "."
@@ -104,7 +111,10 @@ idf_component_register(SRCS ${SOURCES}
                     WHOLE_ARCHIVE
                     )
 
-target_link_libraries(${COMPONENT_LIB} PRIVATE idf::bt idf::fatfs idf::sdmmc idf::esp_driver_sdmmc idf::espressif__zlib idf::esp_partition idf::espcoredump idf::esp-ml307 idf::esp-wifi-connect)
+target_link_libraries(${COMPONENT_LIB} PRIVATE idf::fatfs idf::sdmmc idf::esp_driver_sdmmc idf::espressif__zlib idf::esp_partition idf::espcoredump idf::esp-ml307 idf::esp-wifi-connect)
+if(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::bt)
+endif()
 if(TARGET idf::espressif__esp_tinyusb)
     # ESP-IDF 6 no longer exports the legacy idf::usb target; the TinyUSB
     # component brings the USB implementation transitively.
