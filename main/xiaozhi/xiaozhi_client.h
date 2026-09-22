@@ -67,7 +67,8 @@ private:
     // keeps polling while the server waits for the binding code to be entered.
     void ServiceActivation();
     void HandleData(uint32_t epoch, const char* data, size_t length, bool binary);
-    void HandleDisconnect(uint32_t epoch);
+    void HandleDisconnect(uint32_t epoch, const char* cause="transport", int error=0);
+    void CheckTurnProgress(int64_t now_ms);
     void PublishStatus(const char* status);
     void SendPendingAction();
     bool SendText(const std::string& message);
@@ -80,7 +81,7 @@ private:
     // Closes the microphone side of a manual window without telling the server
     // to stop: used when the utterance is already on its way.
     void EndListenWindowLocked();
-    void InvalidateTransportLocked();
+    void InvalidateTransportLocked(const char* cause="reset");
 
     std::atomic<bool> started_{false},sleep_ready_{false};
     std::atomic<bool> connected_{false};
@@ -111,6 +112,11 @@ private:
     std::atomic<bool> restore_requested_{false};
     std::atomic<int64_t> listen_started_ms_{0};
     std::atomic<int64_t> response_started_ms_{0};
+    // All times use monotonic milliseconds. A hard limit is independent of
+    // keepalives/emotion notifications and survives a lost response timer.
+    int64_t turn_started_ms_ = 0, hello_started_ms_ = 0;
+    std::atomic<uint32_t> uplink_packets_{0}, uplink_bytes_{0};
+    std::atomic<bool> uplink_failed_{false};
     // A release or disconnect clears intent. Reconnect never opens the mic.
     std::atomic<bool> listen_requested_{false};
     std::atomic<uint32_t> json_events_logged_{0};

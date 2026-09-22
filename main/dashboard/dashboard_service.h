@@ -36,6 +36,8 @@ private:
     void SaveQuotaSnapshot(const Quota& quota);
     bool EnsureNetwork();
     bool FetchWeather();
+    void ServiceWeatherSetup();
+    bool FetchJson(const std::string& url, std::string& body);
     bool FetchQuota();
     void PublishNetwork(const char* text);
 
@@ -47,6 +49,7 @@ private:
     std::string quota_url_;
     std::string quota_token_;
     uint32_t refresh_interval_ms_ = 10U * 60U * 1000U;
+    bool configured_place_ = false;
     bool network_attempted_ = false;
     bool network_ready_ = false;
     int64_t last_network_check_ms_ = 0;

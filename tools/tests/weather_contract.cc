@@ -1,0 +1,53 @@
+#include "dashboard/weather_provider.h"
+#include "input/text_input.h"
+#include <cJSON.h>
+#include <cassert>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <thread>
+using namespace dashboard;
+static unsigned checks=0;
+#define CHECK(x) do {++checks; if(!(x)){std::fprintf(stderr,"CHECK failed %d: %s\n",__LINE__,#x);std::abort();}}while(0)
+static std::string replace(std::string s,const std::string& a,const std::string& b){auto p=s.find(a);assert(p!=s.npos);s.replace(p,a.size(),b);return s;}
+int main(){
+    WeatherPlace p{1796236,"上海","上海市 · 中国",31.22,121.46},out;
+    CHECK(ValidWeatherPlace(p));CHECK(DecodeWeatherPlace(EncodeWeatherPlace(p),out));CHECK(out.name==p.name && out.longitude==p.longitude);
+    for(double n:{std::nan(""),std::numeric_limits<double>::infinity(),91.0,-91.0}){auto bad=p;bad.latitude=n;CHECK(!ValidWeatherPlace(bad));}
+    CHECK(!WeatherForecastUrl(p).empty());CHECK(WeatherForecastUrl(p).find("timeformat=unixtime")!=std::string::npos);
+    CHECK(WeatherSearchUrl("上海&").find("%E4%B8%8A%E6%B5%B7%26")!=std::string::npos);
+    CHECK(WeatherSearchUrl("\ncity").empty());CHECK(WeatherSearchUrl("").empty());CHECK(WeatherSearchUrl(std::string(91,'a')).empty());
+    CHECK(WeatherSearchUrl(std::string("x\0y",3)).empty());CHECK(WeatherSearchUrl(std::string("\xc0\xaf",2)).empty());
+    const std::string place_json=R"({"results":[{"id":1796236,"name":"上海","latitude":31.22,"longitude":121.46,"admin1":"上海市","country":"中国"},{"id":1796236,"name":"重复","latitude":31.2,"longitude":121.4},{"id":1.5,"name":"bad","latitude":1,"longitude":2}]})";
+    std::vector<WeatherPlace> places;CHECK(ParseWeatherPlaces(place_json,places));CHECK(places.size()==1 && places[0].name=="上海");
+    CHECK(ParseWeatherPlaces("{}",places)&&places.empty());CHECK(!ParseWeatherPlaces("{\"results\":false}",places));
+    CHECK(!ParseWeatherPlaces("{\"error\":true}",places));CHECK(!ParseWeatherPlaces(place_json+"trailing",places));
+    CHECK(!DecodeWeatherPlace(replace(EncodeWeatherPlace(p),"上海","上海\\u0000ignored"),out));
+    CHECK(!DecodeWeatherPlace(replace(EncodeWeatherPlace(p),"\"schema\":1","\"schema\":2"),out));
+    const std::string forecast=R"({"current_units":{"time":"unixtime","temperature_2m":"°C","apparent_temperature":"°C","relative_humidity_2m":"%","wind_speed_10m":"km/h"},"current":{"time":1790035200,"temperature_2m":23.5,"apparent_temperature":25.4,"relative_humidity_2m":64,"wind_speed_10m":9.2,"weather_code":2}})";
+    Weather w;CHECK(ParseWeatherForecast(forecast,p.name,w));CHECK(w.temperature_c==24&&w.feels_like_c==25&&w.humidity==64&&w.wind_kmh==9);
+    CHECK(w.updated_epoch==1790035200 && std::string(w.condition)=="多云");
+    for(const auto& malformed:{replace(forecast,"°C","°F"),replace(forecast,"km/h","m/s"),replace(forecast,"23.5","null"),replace(forecast,"64","101"),replace(forecast,"1790035200","0"),replace(forecast,"\"weather_code\":2","\"weather_code\":4"),forecast+"[]",std::string(16385,' ')}) {
+        const auto prior=w;CHECK(!ParseWeatherForecast(malformed,p.name,w));CHECK(w.temperature_c==prior.temperature_c&&w.valid);
+    }
+    for(int code:{0,1,2,3,45,48,51,53,55,56,57,61,63,65,66,67,71,73,75,77,80,81,82,85,86,95,96,99}) {
+        CHECK(ParseWeatherForecast(replace(forecast,"\"weather_code\":2","\"weather_code\":"+std::to_string(code)),p.name,w));CHECK(w.condition[0]);
+    }
+    const auto url=WeatherForecastUrl(p),cache=EncodeWeatherCache(url,w);Weather cached;
+    CHECK(!cache.empty());CHECK(DecodeWeatherCache(cache,url,cached));CHECK(cached.from_cache&&cached.valid&&cached.updated_epoch==w.updated_epoch);
+    CHECK(!DecodeWeatherCache(cache,url+"other",cached));CHECK(!DecodeWeatherCache(replace(cache,"\"wind\":9","\"wind\":-1"),url,cached));
+    CHECK(!DecodeWeatherCache(cache+"trailing",url,cached));
+    WeatherSetup m;WeatherJob job;
+    m.Restore(p);CHECK(m.Search("上海"));CHECK(!m.Search("北京"));CHECK(m.Take(job)&&job.search);CHECK(!m.Take(job));
+    const auto old=job.generation;CHECK(m.Cancel());m.Searched(old,{p},nullptr);CHECK(m.Snapshot().results.empty());
+    CHECK(m.Search("上海"));CHECK(m.Take(job));m.Searched(job.generation,{p},nullptr);CHECK(m.Snapshot().state==WeatherSetupState::Results);
+    CHECK(!m.Select(1));CHECK(m.Select(0));CHECK(!m.Cancel());CHECK(!m.Search("北京"));CHECK(m.Take(job)&&!job.search);
+    m.Saved(job.generation,false);CHECK(m.Snapshot().selected.id==p.id&&m.Snapshot().state==WeatherSetupState::Error);
+    auto q=p;q.id=42;q.name="另一个城市";
+    CHECK(m.Search("x"));CHECK(m.Take(job));m.Searched(job.generation,{q},nullptr);CHECK(m.Select(0));CHECK(m.Take(job));m.Saved(job.generation,true);
+    CHECK(m.Snapshot().selected.id==42&&m.Snapshot().state==WeatherSetupState::Idle);
+    std::thread reader([&]{for(int i=0;i<1000;++i){const auto s=m.Snapshot();assert(s.results.size()<=5);}});
+    for(int i=0;i<100;++i){CHECK(m.Search("city"));CHECK(m.Take(job));m.Searched(job.generation,{p},nullptr);CHECK(m.Cancel());}reader.join();
+    std::printf("Weather parser/mailbox/cache PASS: %u CHECKs; fake readings only\n",checks);
+}

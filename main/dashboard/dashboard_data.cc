@@ -159,7 +159,7 @@ void DashboardData::ResetDefaults() {
     CopyField(snapshot_.schedule[2].detail, sizeof(snapshot_.schedule[2].detail), "记录今天的进展与明日计划");
     snapshot_.schedule_count = kScheduleCount;
 
-    CopyField(snapshot_.weather.location, sizeof(snapshot_.weather.location), "北京");
+    CopyField(snapshot_.weather.location, sizeof(snapshot_.weather.location), "");
     CopyField(snapshot_.weather.condition, sizeof(snapshot_.weather.condition), "等待更新");
     CopyField(snapshot_.quota.source, sizeof(snapshot_.quota.source), "未连接");
 

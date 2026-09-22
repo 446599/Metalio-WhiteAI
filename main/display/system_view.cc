@@ -20,6 +20,7 @@ RawDisplay::DeviceSnapshot RawDisplay::SystemSnapshot() {
         case ProductPage::Recorder: name="recorder";break;
         case ProductPage::AiResult: case ProductPage::AiSteps: name=voice_note_mode_ ? "voice_note" : "assistant";break;
         case ProductPage::ChatList: case ProductPage::ChatDetail: name="chat_history";break;
+        case ProductPage::Weather: name="weather";break;
         case ProductPage::NoteCompose: case ProductPage::Notes: case ProductPage::NoteDetail: name="notes";break;
         case ProductPage::QuickNote: name="capsules";break;
         case ProductPage::Reader: name="reader";break;
@@ -93,7 +94,7 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
             StrokeRoundRect((i ? 248 : 32),672,200,48,12,1);
             DrawTextCentered((i ? 248 : 32),672,200,48,i ? "下一页" : "上一页",ui_font_small);
         }
-        DrawProductControlRailLocked("返回目录 / 语音整理，保留原文");
+        DrawProductControlRailLocked("");
         return;
     }
     notes_pages_=std::max(1,(static_cast<int>(items.size())+notes_ui::kRows-1)/notes_ui::kRows);
@@ -107,16 +108,16 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
         if (!note.project.empty()) stamp=note.project+" / "+stamp;
         if (note.done) stamp="已处理 / "+stamp;
         const int y=notes_ui::kY+row*notes_ui::kPitch;
-        if(navigation_index_==row)FillRoundRect(32,y+12,40,40,12,true);
-        DrawProductIconLocked(lucide::Id::NotebookPen,38,y+18,28,navigation_index_!=row);
+        if(navigation_focus_ && navigation_index_==row)FillRect(38,y+60,24,2,true);
+        DrawProductIconLocked(lucide::Id::NotebookPen,38,y+18,28,true);
         DrawProductLabelLocked(88,y+2,328,note.title.c_str(),ui_font_body);
         DrawProductLabelLocked(88,y+44,328,stamp.c_str(),ui_font_small);
         DrawProductChevronLocked(436,y+28);FillRect(88,y+notes_ui::kHeight-1,360,1,true);
     }
     if (items.empty()) {
         DrawProductIconLocked(lucide::Id::NotebookPen,220,216,40,true);
-        DrawTextCentered(32,300,416,48,notes::DeviceStore().Ready() ? (notes_query_.empty() ? "点击新建，或让小智记录" : "没有匹配的笔记") : "请检查 SD 卡",ui_font_body);
-        DrawTextCentered(32,364,416,40,notes_query_.empty() ? "支持离线拼音输入" : "搜索中清空文字可显示全部",ui_font_small);
+        DrawTextCentered(32,300,416,48,notes::DeviceStore().Ready() ? (notes_query_.empty() ? "还没有笔记" : "没有匹配的笔记") : "请检查 SD 卡",ui_font_body);
+
     }
     const char* controls[]={"新建", "搜索", "下一页"};
     const int xs[]={32,174,316};
@@ -124,5 +125,5 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
         StrokeRoundRect(xs[i],672,132,48,12,1);
         DrawTextCentered(xs[i],672,132,48,controls[i],ui_font_small);
     }
-    DrawProductControlRailLocked("本地输入 / 按住 AI 键语音记录");
+    DrawProductControlRailLocked("");
 }

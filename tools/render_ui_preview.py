@@ -18,6 +18,7 @@ import tempfile
 from preview_input_support import HEADERS, FIELDS, METHODS, EXERCISE
 import preview_mono_support as mono
 import preview_chat_support as chat
+import preview_weather_support as weather
 HEADERS += mono.HEADERS
 FIELDS += mono.FIELDS
 METHODS += mono.METHODS
@@ -26,6 +27,10 @@ HEADERS += chat.HEADERS
 FIELDS += chat.FIELDS
 METHODS += chat.METHODS
 EXERCISE += chat.EXERCISE
+HEADERS += weather.HEADERS
+FIELDS += weather.FIELDS
+METHODS += weather.METHODS
+EXERCISE += weather.EXERCISE
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'main/display/raw_display.cc'
@@ -372,12 +377,12 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix='miaoink-ui-') as temporary:
         host = Path(temporary) / 'preview.cc'
         executable = Path(temporary) / 'preview'
-        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()))
+        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()+'\n'+(ROOT/'main/display/weather_view.cc').read_text()))
         cjson = ROOT / "managed_components/espressif__cjson/cJSON"
         subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson), "-o", str(Path(temporary)/"cjson.o")], check=True)
         subprocess.run([compiler, '-std=c++17', '-O1', '-DFONTPACK_HOST_TEST', '-x', 'c++', '-I', str(ROOT / 'main'),
                         '-I', str(cjson), str(host), str(ROOT / 'main/display/font/ai_ui_assets.c'),
-                        str(ROOT / 'main/dashboard/dashboard_data.cc'),
+                        str(ROOT / 'main/dashboard/dashboard_data.cc'), str(ROOT / 'main/dashboard/weather_provider.cc'),
                         str(ROOT / 'main/display/font/raw_font.cc'),
                         str(ROOT / 'main/display/font/font_loader.c'),
                         str(ROOT / 'main/input/text_input.cc'), str(ROOT / 'main/network/setup_model.cc'), str(ROOT / 'main/xiaozhi/conversation.cc'), str(ROOT / 'main/notes/note_store.cc'), str(ROOT / 'main/reminders/reminder_store.cc'), '-x', 'none', str(Path(temporary)/'cjson.o'), '-o', str(executable)], check=True)

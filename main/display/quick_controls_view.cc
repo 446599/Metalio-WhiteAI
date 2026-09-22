@@ -125,8 +125,8 @@ void RawDisplay::DrawProductQuickControlsLocked() {
         button(32,464,416,64,"锁屏休眠");
         if(device::kBleDiscoveryEnabled)button(32,544,416,48,"实验 BLE 发现");
         if(!state.message.empty())DrawProductLabelLocked(32,608,416,state.message.c_str(),ui_font_small);
-        DrawProductLabelLocked(32,648,416,form_active_.load()?"当前草稿会保留":"电源键也可锁屏 / 闹钟仍会提醒",ui_font_small);
+
     }
     DrawTextCentered(32,688,416,48,"上滑收起",ui_font_small);
-    DrawProductControlRailLocked("HOME 返回");
+    DrawProductControlRailLocked("");
 }

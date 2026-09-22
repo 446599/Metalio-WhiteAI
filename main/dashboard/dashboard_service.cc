@@ -3,6 +3,9 @@
 
 #include "dashboard_data.h"
 #include "dashboard_json.h"
+#include "weather_provider.h"
+#include "xiaozhi/conversation.h"
+#include <nvs.h>
 #include "board.h"
 #include "hal/hal.h"
 #include "settings.h"
@@ -23,12 +26,9 @@ namespace dashboard {
 namespace {
 
 constexpr const char* kTag = "DashboardSvc";
-constexpr const char* kDefaultWeatherUrl =
-    "https://api.open-meteo.com/v1/forecast?latitude=39.9042&longitude=116.4074&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code&timezone=Asia%2FShanghai";
-constexpr const char* kDefaultWeatherLocation = "北京";
 constexpr size_t kMaxResponseBytes = 16U * 1024U;
 constexpr size_t kMaxUrlBytes = 512;
-constexpr size_t kMaxLocationBytes = 64;
+constexpr size_t kMaxLocationBytes = 90;
 constexpr size_t kMaxTokenBytes = 512;
 constexpr int64_t kNetworkCheckIntervalMs = 30 * 1000;
 constexpr int32_t kQuotaCacheSchema = 1;
@@ -51,17 +51,19 @@ bool NumberItem(const cJSON* object, const char* key, double& value) {
     return std::isfinite(value);
 }
 
-const char* WeatherCodeText(int code) {
-    if (code == 0) return "晴朗";
-    if (code <= 3) return "多云";
-    if (code == 45 || code == 48) return "雾";
-    if (code >= 51 && code <= 57) return "毛毛雨";
-    if (code >= 61 && code <= 67) return "雨";
-    if (code >= 71 && code <= 77) return "雪";
-    if (code >= 80 && code <= 82) return "阵雨";
-    if (code >= 85 && code <= 86) return "阵雪";
-    if (code >= 95) return "雷雨";
-    return "天气变化";
+bool LoadWeatherPlace(WeatherPlace& place) {
+    nvs_handle_t handle;
+    if(nvs_open("dashboard",NVS_READONLY,&handle)!=ESP_OK)return false;
+    size_t size=0;bool ok=nvs_get_blob(handle,"wx_place",nullptr,&size)==ESP_OK && size>0 && size<=1024;
+    std::string json;
+    if(ok){json.resize(size);ok=nvs_get_blob(handle,"wx_place",json.data(),&size)==ESP_OK;}
+    nvs_close(handle);return ok && DecodeWeatherPlace(json,place);
+}
+bool SaveWeatherPlace(const WeatherPlace& place) {
+    const auto json=EncodeWeatherPlace(place);if(json.empty())return false;
+    nvs_handle_t handle;if(nvs_open("dashboard",NVS_READWRITE,&handle)!=ESP_OK)return false;
+    const bool ok=nvs_set_blob(handle,"wx_place",json.data(),json.size())==ESP_OK && nvs_commit(handle)==ESP_OK;
+    nvs_close(handle);return ok;
 }
 
 // Http::ReadAll() materializes an entire remote response before the caller can
@@ -127,13 +129,21 @@ void DashboardService::TaskEntry(void* arg) {
 
 void DashboardService::LoadConfig() {
     Settings settings("dashboard", false);
-    weather_url_ = settings.GetString("weather_url", kDefaultWeatherUrl);
-    weather_location_ = settings.GetString("weather_loc", kDefaultWeatherLocation);
+    // Preserve an explicitly provisioned endpoint, but do not pretend Beijing
+    // is the user's location. On-device city selection takes precedence.
+    weather_url_ = settings.GetString("weather_url", "");
+    weather_location_ = settings.GetString("weather_loc", "");
+    WeatherPlace place;
+    if(LoadWeatherPlace(place)) {
+        WeatherSetup::Instance().Restore(place);configured_place_=true;
+        weather_url_=WeatherForecastUrl(place);weather_location_=place.name;
+    }
+    if(weather_url_.rfind("https://",0)!=0)weather_url_.clear();
     quota_url_ = settings.GetString("quota_url", "");
     quota_token_ = settings.GetString("quota_token", "");
     if (weather_url_.size() > kMaxUrlBytes) weather_url_.clear();
     if (quota_url_.size() > kMaxUrlBytes) quota_url_.clear();
-    if (weather_location_.size() > kMaxLocationBytes) weather_location_ = kDefaultWeatherLocation;
+    if (weather_location_.size() > kMaxLocationBytes) weather_location_.clear();
     if (quota_token_.size() > kMaxTokenBytes) quota_token_.clear();
     const int32_t refresh_minutes = settings.GetInt("refresh_minutes", 10);
     refresh_interval_ms_ = static_cast<uint32_t>(std::clamp<int32_t>(refresh_minutes, 1, 120)) * 60U * 1000U;
@@ -187,24 +197,17 @@ void DashboardService::LoadConfig() {
 void DashboardService::LoadCachedSnapshots() {
     Settings settings("dashboard", false);
     auto& data = DashboardData::GetInstance();
-    if (settings.GetBool("w_valid", false)) {
-        Weather weather;
-        weather.valid = true;
-        weather.from_cache = true;
-        CopyText(weather.location, sizeof(weather.location),
-                 settings.GetString("w_loc", weather_location_).c_str());
-        CopyText(weather.condition, sizeof(weather.condition),
-                 settings.GetString("w_cond", "天气待更新").c_str());
-        weather.temperature_c = static_cast<int16_t>(std::clamp<int32_t>(
-            settings.GetInt("w_temp", 0), -99, 99));
-        weather.feels_like_c = static_cast<int16_t>(std::clamp<int32_t>(
-            settings.GetInt("w_feels", 0), -99, 99));
-        weather.humidity = static_cast<uint8_t>(std::clamp<int32_t>(
-            settings.GetInt("w_hum", 0), 0, 100));
-        weather.wind_kmh = static_cast<int16_t>(std::clamp<int32_t>(
-            settings.GetInt("w_wind", 0), 0, 999));
-        weather.updated_epoch = static_cast<uint32_t>(std::max<int32_t>(settings.GetInt("w_epoch", 0), 0));
-        data.SetWeather(weather);
+    // One committed record binds the city, source and all readings together.
+    // Ignore old multi-key weather snapshots: torn caches must not look current.
+    nvs_handle_t handle;
+    if(!weather_url_.empty() && nvs_open("dashboard",NVS_READONLY,&handle)==ESP_OK) {
+        size_t size=0;
+        if(nvs_get_blob(handle,"wx_cache",nullptr,&size)==ESP_OK && size>0 && size<=2048) {
+            std::string json(size,'\0');Weather weather;
+            if(nvs_get_blob(handle,"wx_cache",json.data(),&size)==ESP_OK &&
+               DecodeWeatherCache(json,weather_url_,weather))data.SetWeather(weather);
+        }
+        nvs_close(handle);
     }
     // Earlier firmware cached percentages after the ambiguous 0..1 conversion.
     // Do not present a possibly incorrect pre-fix quota as a valid reading.
@@ -224,15 +227,12 @@ void DashboardService::LoadCachedSnapshots() {
 }
 
 void DashboardService::SaveWeatherSnapshot(const Weather& weather) {
-    Settings settings("dashboard", true);
-    settings.SetBool("w_valid", weather.valid);
-    settings.SetString("w_loc", weather.location);
-    settings.SetString("w_cond", weather.condition);
-    settings.SetInt("w_temp", weather.temperature_c);
-    settings.SetInt("w_feels", weather.feels_like_c);
-    settings.SetInt("w_hum", weather.humidity);
-    settings.SetInt("w_wind", weather.wind_kmh);
-    settings.SetInt("w_epoch", static_cast<int32_t>(weather.updated_epoch));
+    const auto json=EncodeWeatherCache(weather_url_,weather);
+    nvs_handle_t handle;
+    if(json.empty() || nvs_open("dashboard",NVS_READWRITE,&handle)!=ESP_OK)return;
+    const bool ok=nvs_set_blob(handle,"wx_cache",json.data(),json.size())==ESP_OK && nvs_commit(handle)==ESP_OK;
+    nvs_close(handle);
+    if(!ok)ESP_LOGW(kTag,"weather cache not saved");
 }
 
 void DashboardService::SaveQuotaSnapshot(const Quota& quota) {
@@ -285,59 +285,60 @@ bool DashboardService::EnsureNetwork() {
     return ready;
 }
 
-bool DashboardService::FetchWeather() {
-    auto* network = Board::GetInstance().GetNetwork();
-    if (network == nullptr || weather_url_.empty()) return false;
-    auto http = network->CreateHttp();
-    if (!http) return false;
-    http->SetTimeout(20000);
-    http->SetHeader("Accept", "application/json");
-    http->SetKeepAlive(false);
-    if (!http->Open("GET", weather_url_)) {
-        http->Close();
-        return false;
-    }
-    const int status = http->GetStatusCode();
-    if (status < 200 || status >= 300) {
-        http->Close();
-        return false;
-    }
-    std::string body;
-    const bool read_ok = ReadBounded(http.get(), kMaxResponseBytes, body);
-    http->Close();
-    if (!read_ok) return false;
+bool DashboardService::FetchJson(const std::string& url,std::string& body) {
+    if(url.empty() || url.size()>kMaxUrlBytes || url.rfind("https://",0)!=0)return false;
+    auto* network=Board::GetInstance().GetNetwork();if(!network)return false;
+    auto http=network->CreateHttp();if(!http)return false;
+    http->SetTimeout(10000);http->SetHeader("Accept","application/json");http->SetKeepAlive(false);
+    if(!http->Open("GET",url)){http->Close();return false;}
+    const int status=http->GetStatusCode();
+    const bool ok=status==200 && ReadBounded(http.get(),kMaxResponseBytes,body);
+    http->Close();return ok;
+}
 
-    cJSON* root = cJSON_ParseWithLength(body.data(), body.size());
-    if (root == nullptr) return false;
-    const cJSON* current = ObjectItem(root, "current");
-    if (current == nullptr) current = root;
-    double temperature = 0, feels_like = 0, humidity = 0, wind = 0, code = 0;
-    const bool ok = NumberItem(current, "temperature_2m", temperature) &&
-                   NumberItem(current, "apparent_temperature", feels_like) &&
-                   NumberItem(current, "relative_humidity_2m", humidity) &&
-                   NumberItem(current, "wind_speed_10m", wind) &&
-                   NumberItem(current, "weather_code", code) &&
-                   temperature >= -99 && temperature <= 99 &&
-                   feels_like >= -99 && feels_like <= 99 &&
-                   humidity >= 0 && humidity <= 100 && wind >= 0 && wind <= 999 &&
-                   code >= 0 && code <= 99;
-    if (ok) {
-        Weather weather;
-        weather.valid = true;
-        weather.request_state = RequestState::Succeeded;
-        CopyText(weather.location, sizeof(weather.location), weather_location_.c_str());
-        CopyText(weather.condition, sizeof(weather.condition), WeatherCodeText(static_cast<int>(std::lround(code))));
-        weather.temperature_c = static_cast<int16_t>(std::clamp<int>(static_cast<int>(std::lround(temperature)), -99, 99));
-        weather.feels_like_c = static_cast<int16_t>(std::clamp<int>(static_cast<int>(std::lround(feels_like)), -99, 99));
-        weather.humidity = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::lround(humidity)), 0, 100));
-        weather.wind_kmh = static_cast<int16_t>(std::clamp<int>(static_cast<int>(std::lround(wind)), 0, 999));
-        weather.updated_epoch = TimestampNow();
-        DashboardData::GetInstance().SetWeather(weather);
-        SaveWeatherSnapshot(weather);
-        ESP_LOGI(kTag, "weather snapshot updated");
+void DashboardService::ServiceWeatherSetup() {
+    WeatherJob job;if(!WeatherSetup::Instance().Take(job))return;
+    auto& setup=WeatherSetup::Instance();
+    if(job.search) {
+        if(!EnsureNetwork()){setup.Searched(job.generation,{},"未联网");return;}
+        std::string json;std::vector<WeatherPlace> results;
+        const bool ok=FetchJson(WeatherSearchUrl(job.query),json) && ParseWeatherPlaces(json,results);
+        setup.Searched(job.generation,std::move(results),ok?nullptr:"搜索失败，请重试");
+    } else {
+        // Selection cannot be cancelled once Saving is published. One committed
+        // blob contains both coordinates and label, never a torn pair.
+        const bool ok=SaveWeatherPlace(job.place);
+        if(ok){configured_place_=true;weather_location_=job.place.name;weather_url_=WeatherForecastUrl(job.place);
+            Weather empty;CopyText(empty.location,sizeof(empty.location),weather_location_.c_str());
+            DashboardData::GetInstance().SetWeather(empty);last_refresh_ms_=0;refresh_requested_.store(true);}
+        setup.Saved(job.generation,ok);
     }
-    cJSON_Delete(root);
-    return ok;
+}
+
+bool DashboardService::FetchWeather() {
+    std::string body;if(!FetchJson(weather_url_,body))return false;
+    Weather weather;
+    if(configured_place_) {
+        if(!ParseWeatherForecast(body,weather_location_,weather))return false;
+    } else {
+        // Legacy configured provider compatibility; never forward quota tokens
+        // to the weather service. New Open-Meteo path requires explicit units.
+        cJSON* root=cJSON_ParseWithLengthOpts(body.c_str(),body.size()+1,nullptr,true);
+        if(!root)return false;
+        const cJSON* current=ObjectItem(root,"current");if(!current)current=root;
+        double temperature,feels,humidity,wind,code;
+        const bool ok=NumberItem(current,"temperature_2m",temperature) && NumberItem(current,"apparent_temperature",feels) &&
+            NumberItem(current,"relative_humidity_2m",humidity) && NumberItem(current,"wind_speed_10m",wind) &&
+            NumberItem(current,"weather_code",code) && temperature>=-99 && temperature<=99 && feels>=-99 && feels<=99 &&
+            humidity>=0 && humidity<=100 && wind>=0 && wind<=999 && code>=0 && code<=99 && std::trunc(code)==code && WeatherCondition(static_cast<int>(code));
+        if(ok){weather.valid=true;weather.request_state=RequestState::Succeeded;
+            CopyText(weather.location,sizeof(weather.location),weather_location_.empty()?"自定义":weather_location_.c_str());
+            CopyText(weather.condition,sizeof(weather.condition),WeatherCondition(static_cast<int>(code)));weather.temperature_c=std::lround(temperature);
+            weather.feels_like_c=std::lround(feels);weather.humidity=std::lround(humidity);weather.wind_kmh=std::lround(wind);weather.updated_epoch=TimestampNow();}
+        cJSON_Delete(root);if(!ok)return false;
+    }
+    DashboardData::GetInstance().SetWeather(weather);SaveWeatherSnapshot(weather);
+    ESP_LOGI(kTag,"weather snapshot updated");return true;
 }
 
 bool DashboardService::FetchQuota() {
@@ -386,10 +387,20 @@ void DashboardService::Run() {
         if(power::Locked()){sleep_ready_.store(true);vTaskDelay(pdMS_TO_TICKS(100));continue;}
         sleep_ready_.store(false);
         power::Activity activity;if(!activity){vTaskDelay(pdMS_TO_TICKS(20));continue;}
+        // Defer optional HTTP work while a foreground voice turn is active.
+        // Reuse the provider task; do not allocate another internal task stack.
+        const auto turn=xiaozhi::Conversation::GetInstance().State();
+        if(turn==xiaozhi::TurnState::Connecting || turn==xiaozhi::TurnState::Listening ||
+           turn==xiaozhi::TurnState::Transcribing || turn==xiaozhi::TurnState::Thinking ||
+           turn==xiaozhi::TurnState::Speaking) {
+            activity.Release();vTaskDelay(pdMS_TO_TICKS(1000));continue;
+        }
+        ServiceWeatherSetup();
         const int64_t now_ms = esp_timer_get_time() / 1000;
         auto& data = DashboardData::GetInstance();
         data.UpdateFreshness(TimestampNow());
-        const bool requested = refresh_requested_.exchange(false);
+        const bool requested = refresh_requested_.exchange(false) &&
+            (last_refresh_ms_==0 || now_ms-last_refresh_ms_>=60000);
         const bool network_due = last_network_check_ms_ == 0 ||
                                  now_ms - last_network_check_ms_ >= kNetworkCheckIntervalMs ||
                                  requested;

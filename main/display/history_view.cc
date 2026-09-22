@@ -19,7 +19,7 @@ void RawDisplay::DrawProductHistoryLocked(bool detail){
         DrawProductLabelLocked(32,232,416,"从历史列表移除，不影响其他会话。",ui_font_body);
         DrawProductLabelLocked(32,296,416,"SD 卡保留 .deleted 目录用于恢复。",ui_font_small);
         button(32,496,200,"取消");button(248,496,200,"确认删除");
-        DrawProductControlRailLocked("HOME / 返回取消");return;
+        DrawProductControlRailLocked("");return;
     }
     if(!detail){
         char count[32];std::snprintf(count,sizeof(count),"%u / 64",static_cast<unsigned>(view.sessions.size()));
@@ -38,7 +38,7 @@ void RawDisplay::DrawProductHistoryLocked(bool detail){
         if(view.sessions.empty()&&!view.busy){DrawProductIconLocked(lucide::Id::MessageSquare,220,264,40,true);
             DrawTextCentered(32,332,416,48,"还没有历史对话",ui_font_body);DrawTextCentered(32,396,416,40,"插入 SD 卡后自动保存每轮问答",ui_font_small);}
         button(32,624,132,"新建");button(174,624,132,"上一页");button(316,624,132,"下一页");button(32,688,416,"返回小智");
-        DrawProductControlRailLocked("本机 SD 历史 / 不占用笔记容量");return;
+        DrawProductControlRailLocked("");return;
     }
     DrawProductHeadingLocked("对话详情","");button(344,72,104,"返回");
     if(!view.turn){DrawProductLabelLocked(32,192,416,view.busy?"正在读取…":view.message.c_str(),ui_font_body);return;}
