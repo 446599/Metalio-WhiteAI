@@ -21,7 +21,7 @@ def main():
     header = re.sub(r'#include <freertos/[^>]+>', '', header).replace('#pragma once', '')
     header = header.replace('#include "conversation.h"', '#include "xiaozhi/conversation.h"')
     header = header.replace('private:', 'public:')
-    methods = ['ListenStart', 'ListenStop', 'Abort', 'RunQuickAction', 'SaveCapsule', 'RestoreCapsule',
+    methods = ['BeginTextTask', 'CaptureHistory', 'SubmitText', 'SwitchChat', 'DeleteChat', 'ListenStart', 'ListenStop', 'Abort', 'RunQuickAction', 'SaveCapsule', 'RestoreCapsule',
                'IsListening', 'IsSessionReady', 'EndListenWindowLocked',
                'InvalidateTransportLocked', 'HandleDisconnect', 'SavePendingCapsule',
                'ConnectOnce', 'ReleaseTransport', 'SendPendingAction', 'HandleData']
@@ -48,6 +48,7 @@ def main():
 #include <nvs.h>
 #include "dashboard/dashboard_data.h"
 #include "xiaozhi/conversation.h"
+#include "tests/chat_client_history_stub.h"
 using TaskHandle_t = void*;
 int64_t fake_us = 1000000;
 int64_t esp_timer_get_time() { return fake_us; }
@@ -192,7 +193,12 @@ int main() {
     cJSON* request = cJSON_Parse(sent.back().c_str());
     assert(request);
     assert(std::strcmp(cJSON_GetObjectItem(request,"state")->valuestring,"detect")==0);
-    assert(std::strstr(cJSON_GetObjectItem(request,"text")->valuestring,"待办清单"));
+    assert(std::strcmp(cJSON_GetObjectItem(request,"text")->valuestring,"待办草稿")==0);
+    assert(std::strstr(cJSON_GetObjectItem(request,"text")->valuestring,"闪念")==nullptr);
+    assert(!ChatTask::Instance().ReadAll());
+    auto task=ChatTask::Instance().Read(0,0);
+    assert(task.ok && task.text.find("待办清单")!=std::string::npos && task.text.find("闪念")!=std::string::npos);
+    assert(ChatTask::Instance().ReadAll());
     cJSON_Delete(request);
     event(R"({"type":"stt","text":"server echo of the follow-up prompt"})");
     assert(conversation.Snapshot().transcript == original);
@@ -276,6 +282,33 @@ int main() {
     assert(conversation.Snapshot().saving_revision==grown.content_revision && !conversation.Snapshot().save_failed);
     conversation.MarkSaved(grown.turn,grown.content_revision,false);
     assert(!conversation.Snapshot().saved && conversation.Snapshot().save_failed);
+    // All three actions use short approved wake events, fetched MCP text and
+    // a terminal response. Unread task responses are not accepted as success.
+    for(auto action:{QuickAction::Organize,QuickAction::Tasks,QuickAction::Translate}){
+        client.Abort();connected();fake_us+=12000000;
+        conversation.Restore("测试原文，包含引号和换行","旧回答");
+        assert(client.RunQuickAction(action));client.SendPendingAction();
+        if(action==QuickAction::Translate){event(R"({"type":"tts","state":"start"})");assert(!audio.playback);}
+        auto pending=ChatTask::Instance().Read(0,0);assert(pending.ok&&!pending.text.empty());
+        if(action!=QuickAction::Translate)event(R"({"type":"tts","state":"start"})");
+        event(R"({"type":"tts","state":"sentence_start","text":"处理结果"})");
+        assert(audio.playback);
+        event(R"({"type":"tts","state":"stop"})");
+        assert(conversation.Snapshot().state==TurnState::Done && conversation.Snapshot().answer=="处理结果");
+        assert(!ChatTask::Instance().ReadAll());
+    }
+    client.Abort();connected();fake_us+=12000000;conversation.Restore("原文不可丢","旧回答");
+    assert(client.RunQuickAction(QuickAction::Translate));client.SendPendingAction();
+    event(R"({"type":"tts","state":"sentence_start","text":"没有读取工具的问候"})");
+    event(R"({"type":"tts","state":"stop"})");
+    assert(conversation.Snapshot().state==TurnState::Error && conversation.Snapshot().transcript=="原文不可丢");
+    assert(conversation.Snapshot().answer.empty());
+    client.Abort();connected();fake_us+=12000000;conversation.Clear();
+    assert(client.SubmitText("你好，今天怎么安排？"));client.SendPendingAction();
+    auto typed=ChatTask::Instance().Read(0,0);assert(typed.ok && typed.text.find("今天怎么安排")!=std::string::npos);
+    event(R"({"type":"alert","message":"服务拒绝了请求"})");
+    assert(conversation.Snapshot().message=="服务拒绝了请求" && conversation.Snapshot().transcript=="你好，今天怎么安排？");
+    assert(chat::captured_statuses.end()!=std::find(chat::captured_statuses.begin(),chat::captured_statuses.end(),"complete"));
     // Full bounded strings never end inside a multibyte codepoint.
     conversation.Begin();
     std::string long_text;
@@ -334,7 +367,7 @@ int nvs_set_blob(nvs_handle_t,const char*,const void*,size_t);
 int nvs_get_blob(nvs_handle_t,const char*,void*,size_t*);
 int nvs_commit(nvs_handle_t);
 """)
-        subprocess.run([compiler, '-std=c++17', '-O1', '-Wno-deprecated-declarations', '-I', str(tmp), '-I', str(ROOT/'main'), '-I', str(cjson),
+        subprocess.run([compiler, '-std=c++17', '-O1', '-Wno-deprecated-declarations', '-I', str(tmp), '-I', str(ROOT/'main'), '-I', str(ROOT/'tools'), '-I', str(cjson),
                         str(tmp/'test.cc'), str(ROOT/'main/xiaozhi/conversation.cc'),
                         str(ROOT/'main/xiaozhi/capsule_store.cc'),
                         str(ROOT/'main/dashboard/dashboard_data.cc'), str(cjson/'cJSON.c'),

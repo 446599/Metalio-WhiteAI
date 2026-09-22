@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Rasterize pinned Lucide SVGs into native 1-bit firmware icons.
-Requires Pillow and @resvg/resvg-js 2.6.2. Pass --resvg /path/to/node/module.
+Requires Pillow and CairoSVG 2.8.2. Optional --resvg /path/to/node/module uses resvg-js 2.6.2.
 """
 import argparse, hashlib, json, subprocess, tempfile
+import cairosvg
 from pathlib import Path
 from PIL import Image
 ROOT=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--resvg',required=True)
+parser.add_argument('--resvg',help='Optional resvg-js module; default CairoSVG 2.8.2')
 args=parser.parse_args()
 source=ROOT/'assets/icons/lucide'
 metadata=json.loads((source/'source.json').read_text())
@@ -22,7 +23,10 @@ with tempfile.TemporaryDirectory() as folder:
     for name in names:
         for size in (24,28,32,40):
             png=Path(folder)/'icon.png'
-            subprocess.run(['node','-e', 'const fs=require("fs"),{Resvg}=require(process.argv[1]); const svg=fs.readFileSync(process.argv[2],"utf8").replace(/currentColor/g,"black"); fs.writeFileSync(process.argv[3],new Resvg(svg,{fitTo:{mode:"width",value:Number(process.argv[4])},background:"white"}).render().asPng());',args.resvg,str(source/(name+'.svg')),str(png),str(size)],check=True)
+            if args.resvg:
+                subprocess.run(['node','-e', 'const fs=require("fs"),{Resvg}=require(process.argv[1]); const svg=fs.readFileSync(process.argv[2],"utf8").replace(/currentColor/g,"black"); fs.writeFileSync(process.argv[3],new Resvg(svg,{fitTo:{mode:"width",value:Number(process.argv[4])},background:"white"}).render().asPng());',args.resvg,str(source/(name+'.svg')),str(png),str(size)],check=True)
+            else:
+                cairosvg.svg2png(bytestring=(source/(name+'.svg')).read_bytes().replace(b'currentColor',b'black'),write_to=str(png),output_width=size,output_height=size,background_color='white')
             im=Image.open(png).convert('L'); black=[im.getpixel((x,y))<160 for y in range(size) for x in range(size)]
             bits=[sum(int(black[k+j])<<(7-j) for j in range(8)) for k in range(0,len(black),8)]
             rows=[i//size for i,value in enumerate(black) if value]

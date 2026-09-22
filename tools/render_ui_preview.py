@@ -17,10 +17,15 @@ import subprocess
 import tempfile
 from preview_input_support import HEADERS, FIELDS, METHODS, EXERCISE
 import preview_mono_support as mono
+import preview_chat_support as chat
 HEADERS += mono.HEADERS
 FIELDS += mono.FIELDS
 METHODS += mono.METHODS
 EXERCISE += mono.EXERCISE
+HEADERS += chat.HEADERS
+FIELDS += chat.FIELDS
+METHODS += chat.METHODS
+EXERCISE += chat.EXERCISE
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'main/display/raw_display.cc'
@@ -367,7 +372,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix='miaoink-ui-') as temporary:
         host = Path(temporary) / 'preview.cc'
         executable = Path(temporary) / 'preview'
-        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()))
+        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()))
         cjson = ROOT / "managed_components/espressif__cjson/cJSON"
         subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson), "-o", str(Path(temporary)/"cjson.o")], check=True)
         subprocess.run([compiler, '-std=c++17', '-O1', '-DFONTPACK_HOST_TEST', '-x', 'c++', '-I', str(ROOT / 'main'),

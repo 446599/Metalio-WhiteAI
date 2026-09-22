@@ -89,7 +89,7 @@ void Service::Paginate(size_t page){
     std::lock_guard<std::mutex> lock(mutex_);state_.message=saved?"阅读位置已保存":"书签保存失败，本次仍可阅读";
 }
 bool Service::SaveBookmark(){
-    Bookmark bookmark;bookmark.hash=fingerprint_;
+    Bookmark bookmark;std::memset(static_cast<void*>(&bookmark),0,sizeof(bookmark));bookmark.magic=0x57425232;bookmark.hash=fingerprint_;
     {std::lock_guard<std::mutex> lock(mutex_);bookmark.page=state_.page;}
     std::snprintf(bookmark.name,sizeof(bookmark.name),"%s",filename_.c_str());
     nvs_handle_t nvs=0;auto error=nvs_open("reader",NVS_READWRITE,&nvs);

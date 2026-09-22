@@ -39,7 +39,7 @@ uint32_t Writer::Save(const Note& n){assert(ui_lock_depth==0);state_.busy=true;s
 '''
 FIELDS = r'''
     enum class HardwareKey {Previous,Next,Select,Back,Home};
-    enum class EditTarget {None,WifiSsid,WifiPassword,NoteTitle,NoteProject,NoteBody,NoteSearch};
+    enum class EditTarget {None,WifiSsid,WifiPassword,NoteTitle,NoteProject,NoteBody,NoteSearch,ChatMessage};
     input::Editor editor_;
     EditTarget edit_target_=EditTarget::None;
     ProductPage editor_parent_=ProductPage::WifiCredentials,discard_destination_=ProductPage::Home;

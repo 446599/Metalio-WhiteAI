@@ -39,8 +39,9 @@ inline const esp_app_desc_t* esp_app_get_description(){static esp_app_desc_t d;r
 class Application{public:static Application& GetInstance(){static Application a;return a;}void RequestStatusUpdate(bool){++test_updates;}};
 struct HalBtDevice{std::string name,addr;int rssi;};
 class Hal{public:
+ mutable std::function<void()> sd_probe;
  bool sd=true,wifi=true,connected=true,ble_ok=true;int volume=40;unsigned scan_calls=0;
- bool IsSdMounted()const{return sd;}bool IsWifiMode()const{return wifi;}
+ bool IsSdMounted()const{if(sd_probe)sd_probe();return sd;}bool IsWifiMode()const{return wifi;}
  bool WifiIsConnected()const{return connected;}std::string WifiSsid()const{return "Test AP";}
  int GetVolume()const{return volume;}void SetVolume(int v){volume=v;}
  bool BleScan(std::vector<HalBtDevice>& out,std::string&,uint32_t,const std::function<bool()>& cancelled){++scan_calls;if(cancelled())return false;out={{"Fixture BLE","AA:BB:CC:DD:EE:FF",-40}};return ble_ok;}

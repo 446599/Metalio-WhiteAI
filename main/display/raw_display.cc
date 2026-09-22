@@ -1,4 +1,5 @@
 #include "raw_display.h"
+#include "chat/history_service.h"
 #include "system/quick_controls.h"
 #include "input/gesture.h"
 #include "reader/reader_service.h"
@@ -690,6 +691,7 @@ void RawDisplay::ShowAiConversation() {
 void RawDisplay::HandleHomeTap(int x, int y) {
     if (HandleReminderTap(x,y)) return;
     if (HandleQuickTap(x,y)) return;
+    if (HandleHistoryTap(x,y)) return;
     if (HandleSetupTap(x,y)) return;
     if (HandleReaderTap(x,y)) return;
     enum class Action { None, Gray4, PaperMono, PaperText, AnimDu, AnimFc, PaperPage };
@@ -726,7 +728,7 @@ void RawDisplay::HandleHomeTap(int x, int y) {
             switch (product_page_) {
                 case ProductPage::Home: {
                     static constexpr ProductPage pages[] = {ProductPage::Alarm, ProductPage::TodayList,
-                        ProductPage::Recorder, ProductPage::AiResult, ProductPage::Apps, ProductPage::More};
+                        ProductPage::Notes, ProductPage::AiResult, ProductPage::Apps, ProductPage::More};
                     for (int i = 0; i < 4; ++i) {
                         if (in_rect(kUiHomeX[i % 2], kUiHomeY[i / 2], kUiHomeW, kUiHomeH)) next_page = pages[i];
                     }
@@ -808,7 +810,7 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                     }
                     break;
                 case ProductPage::Notes: {
-                    const int row=ProductRowAt(x,y,6,kUiRowPitch,kUiRowHeight);
+                    const int row=notes_ui::RowAt(x,y);
                     if (row>=0 && note_ids_[row]) {note_id_=note_ids_[row];note_text_page_=0;next_page=ProductPage::NoteDetail;}
                     else if (in_rect(32,672,200,48)) {next_page=ProductPage::AiResult;voice_note_mode_=false;voice_notice="按住 AI 键，说：帮我保存一条笔记";}
                     else if (in_rect(248,672,200,48)) {notes_page_=(notes_page_+1)%notes_pages_;navigation_index_=0;redraw=true;}
@@ -829,6 +831,8 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                     }
                     break;
                 }
+                case ProductPage::ChatList:
+                case ProductPage::ChatDetail:
                 case ProductPage::WifiList:
                 case ProductPage::WifiCredentials:
                 case ProductPage::TextEntry:
@@ -936,6 +940,7 @@ void RawDisplay::HandleHomeTap(int x, int y) {
 bool RawDisplay::HandleHardwareKey(HardwareKey key) {
     if (reminders::Service::Instance().IsActive()) return true;
     if (HandleQuickKey(key)) return true;
+    if (HandleHistoryKey(key)) return true;
     if (HandleSetupKey(key)) return true;
     if (HandleReaderKey(key)) return true;
     bool scan_wifi = false;
@@ -1009,7 +1014,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
             };
             auto open_home_selection = [this, &set_page]() {
                 static constexpr ProductPage pages[] = {ProductPage::Alarm,ProductPage::TodayList,
-                    ProductPage::Recorder,ProductPage::AiResult,ProductPage::Apps,ProductPage::More};
+                    ProductPage::Notes,ProductPage::AiResult,ProductPage::Apps,ProductPage::More};
                 set_page(pages[navigation_index_ % 6]);
             };
             auto open_app_selection = [this, &set_page]() {
@@ -1584,6 +1589,8 @@ void RawDisplay::FrameDumpTask() {
                                 case ProductPage::More: page_name = "more"; break;
                                 case ProductPage::Alarm: page_name = "alarm"; break;
                                 case ProductPage::Recorder: page_name = "recorder"; break;
+                                case ProductPage::ChatList: page_name = "chat_history"; break;
+                                case ProductPage::ChatDetail: page_name = "chat_detail"; break;
                                 case ProductPage::Notes: page_name = "notes"; break;
                                 case ProductPage::NoteDetail: page_name = "note_detail"; break;
                                 case ProductPage::WifiList: page_name = "wifi_list"; break;
@@ -2660,14 +2667,14 @@ void RawDisplay::DrawProductHomeLocked() {
     }
     if (earliest) next_alarm = reminders::LocalTime(earliest).substr(11, 5);
     if (events) event_count = std::to_string(events) + " 项安排";
-    const auto recorder = xiaozhi::AudioSession::GetInstance().RecorderState();
-    const char* names[] = {"闹钟", "日历", "录音", "小智"};
-    const char* details[] = {next_alarm.c_str(), event_count.c_str(), recorder.has_clip ? "最近一段" : "随时记录",
+    const char* names[] = {"闹钟", "日历", "笔记", "小智"};
+    const char* details[] = {next_alarm.c_str(), event_count.c_str(), notes::DeviceStore().Ready() ? "记录与搜索" : "请检查 SD 卡",
         std::strcmp(snapshot.ai_status,"请绑定设备")==0 ? "请绑定设备" : "按住 AI 键说话"};
     for (int i = 0; i < 4; ++i) {
         const int x = kUiHomeX[i % 2], y = kUiHomeY[i / 2];
         StrokeRoundRect(x, y, kUiHomeW, kUiHomeH, 16, navigation_index_ == i ? 3 : 1);
-        DrawProductAppIconLocked(i, x + 20, y + 16);
+        if(i==2)DrawProductIconLocked(lucide::Id::NotebookPen,x+20,y+16,40,true);
+        else DrawProductAppIconLocked(i, x + 20, y + 16);
         DrawProductLabelLocked(x + 20, y + 64, kUiHomeW - 40, names[i], ui_font_body);
         DrawProductLabelLocked(x + 20, y + 108, kUiHomeW - 40, details[i], ui_font_small);
     }
@@ -2791,7 +2798,7 @@ void RawDisplay::DrawProductAiLocked(bool details) {
     (void)details;
     std::memset(portrait_fb_, kWhite, portrait_size_);
     DrawProductStatusBarLocked();
-    DrawText(kUiInset, 72, voice_note_mode_ ? "语音笔记" : "小智助手", ui_font_title);
+    DrawProductLabelLocked(kUiInset,72,148,voice_note_mode_ ? "语音笔记" : "小智助手",ui_font_title);
     const auto dashboard = dashboard::DashboardData::GetInstance().GetSnapshot();
     if (std::strcmp(dashboard.ai_status,"请绑定设备")==0) {
         DrawText(32,168,"连接小智",ui_font_body);
@@ -2815,6 +2822,9 @@ void RawDisplay::DrawProductAiLocked(bool details) {
                       snapshot.state == xiaozhi::TurnState::Thinking || snapshot.state == xiaozhi::TurnState::Speaking;
     if(busy) {
         StrokeRoundRect(344,72,104,48,24,1);DrawTextCentered(344,72,104,48,"停止",ui_font_small);
+    }else{
+        const char* buttons[]={"输入","历史","新建"};const int xs[]={188,276,364};
+        for(int i=0;i<3;++i){StrokeRoundRect(xs[i],72,84,48,12,1);DrawTextCentered(xs[i],72,84,48,buttons[i],ui_font_small);}
     }
     if (listening) FillCircle(40, 157, 6, true);
     else StrokeCircle(40, 157, 6, 1);
@@ -2825,6 +2835,7 @@ void RawDisplay::DrawProductAiLocked(bool details) {
                  hint1, sizeof(hint1), hint2, sizeof(hint2));
     DrawText(kUiInset, 188, hint1, ui_font_small);
     DrawText(kUiInset, 216, hint2, ui_font_small);
+    DrawProductLabelLocked(32,244,416,chat::History::Instance().Snapshot().message.c_str(),ui_font_small);
 
     FillRect(kUiInset, 272, kUiContentWidth, 1, true);
     DrawText(kUiInset, 296, ai_show_transcript_ ? "原文 / 切换" : "AI 回答 / 切换", ui_font_small);
@@ -2847,7 +2858,7 @@ void RawDisplay::DrawProductAiLocked(bool details) {
             DrawText(kUiInset, 430, line2, ui_font_body);
         } else {
             DrawText(kUiInset, 376, listening ? "正在听你说…" : "让想法，随时留下。", ui_font_body);
-            DrawText(kUiInset, 436, "识别原文自动保存为最近一条胶囊", ui_font_small);
+            DrawText(kUiInset, 436, "每轮问答自动保存到本地历史", ui_font_small);
             DrawText(kUiInset, 468, "可整理灵感、提炼待办或翻译", ui_font_small);
         }
     } else {
@@ -2864,7 +2875,9 @@ void RawDisplay::DrawProductAiLocked(bool details) {
             if(i==3 && snapshot.state!=xiaozhi::TurnState::Done)continue;
             const int x=kAiActionX[i%2],y=kAiActionY[i/2];
             StrokeRoundRect(x,y,kAiActionW,kAiActionH,24,1);
-            DrawTextCentered(x,y,kAiActionW,kAiActionH,labels[i],ui_font_status);
+            const lucide::Id icons[]={lucide::Id::Sparkles,lucide::Id::ListTodo,lucide::Id::Languages,lucide::Id::NotebookPen};
+            DrawProductIconLocked(icons[i],x+12,y+12,24,true);
+            DrawTextCentered(x+38,y,kAiActionW-42,kAiActionH,labels[i],ui_font_small);
         }
     } else {
         DrawProductLabelLocked(32,632,416,busy ? "回答完成后可整理、翻译和存笔记" : "先按住机身 AI 键，说出你的想法",ui_font_small);
@@ -3077,6 +3090,7 @@ void RawDisplay::DrawProductScreenLocked() {
     last_writer_revision_ = notes::Writer::Instance().Snapshot().revision;
     last_quick_revision_ = device::QuickControls::Instance().Revision();
     last_reader_revision_ = reader::Service::Instance().Revision();
+    last_history_revision_ = chat::History::Instance().Revision();
     AdvanceFormsLocked();
     if (reminder_alert_.active) {
         password_reveal_=false;quick_controls_open_.store(false);
@@ -3102,6 +3116,8 @@ void RawDisplay::DrawProductScreenLocked() {
         case ProductPage::More: DrawProductMoreLocked(); break;
         case ProductPage::Alarm: DrawProductAlarmLocked(); break;
         case ProductPage::Recorder: DrawProductRecorderLocked(); break;
+        case ProductPage::ChatList: DrawProductHistoryLocked(false); break;
+        case ProductPage::ChatDetail: DrawProductHistoryLocked(true); break;
         case ProductPage::Notes: DrawProductNotesLocked(false); break;
         case ProductPage::NoteDetail: DrawProductNotesLocked(true); break;
         case ProductPage::WifiList: DrawProductWifiLocked(false); break;
@@ -4415,7 +4431,8 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
         network::WifiSetup::Instance().Revision()==last_wifi_revision_ &&
         notes::Writer::Instance().Snapshot().revision==last_writer_revision_ &&
         device::QuickControls::Instance().Revision()==last_quick_revision_ &&
-        reader::Service::Instance().Revision()==last_reader_revision_) return;
+        reader::Service::Instance().Revision()==last_reader_revision_ &&
+        chat::History::Instance().Revision()==last_history_revision_) return;
     last_minute_ = tmv.tm_min;
     last_drawn_battery_ = battery_percent_;
     last_drawn_charging_ = charging_;

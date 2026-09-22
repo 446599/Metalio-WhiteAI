@@ -16,6 +16,7 @@
 #include "input/text_input.h"
 #include "network/setup_model.h"
 #include "notes/note_store.h"
+#include "notes_layout.h"
 
 class RawDisplay final : public Display {
 public:
@@ -90,9 +91,14 @@ private:
         WifiCredentials,
         TextEntry,
         NoteCompose,
+        ChatList,
+        ChatDetail,
     };
 
-    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch };
+    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch, ChatMessage };
+    void DrawProductHistoryLocked(bool detail);
+    bool HandleHistoryTap(int x,int y);
+    bool HandleHistoryKey(HardwareKey key);
     bool HandleReaderTap(int x,int y);
     bool HandleReaderKey(HardwareKey key);
     void DrawProductQuickControlsLocked();
@@ -207,6 +213,11 @@ private:
     int quick_ble_page_=0;
     uint32_t last_quick_revision_=0,last_reader_revision_=0;
     int book_list_page_=0;
+    uint32_t last_history_revision_=0;
+    int history_list_page_=0,history_text_page_=0,history_text_pages_=1;
+    bool history_delete_confirm_=false;
+    std::string chat_draft_;
+
     std::string selected_card_title_,selected_card_text_;
     esp_lcd_panel_handle_t panel_ = nullptr;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;

@@ -18,6 +18,7 @@ RawDisplay::DeviceSnapshot RawDisplay::SystemSnapshot() {
         case ProductPage::TodayList: name="calendar";break;
         case ProductPage::Recorder: name="recorder";break;
         case ProductPage::AiResult: case ProductPage::AiSteps: name=voice_note_mode_ ? "voice_note" : "assistant";break;
+        case ProductPage::ChatList: case ProductPage::ChatDetail: name="chat_history";break;
         case ProductPage::NoteCompose: case ProductPage::Notes: case ProductPage::NoteDetail: name="notes";break;
         case ProductPage::QuickNote: name="capsules";break;
         case ProductPage::Reader: name="reader";break;
@@ -74,16 +75,16 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
     if (detail) {
         const auto it=std::find_if(items.begin(),items.end(),[this](const auto& item){return item.id==note_id_;});
         DrawProductHeadingLocked("笔记详情","");
-        DrawProductLabelLocked(32,120,416,it==items.end() ? "笔记已删除" : it->title.c_str(),ui_font_small);
+        DrawProductLabelLocked(32,notes_ui::kDetailTitleY,416,it==items.end() ? "笔记已删除" : it->title.c_str(),ui_font_body);
         if(it!=items.end()) {StrokeRoundRect(344,72,104,48,12,1);DrawTextCentered(344,72,104,48,"编辑",ui_font_small);}
         const std::string body=it==items.end() ? "返回笔记目录查看其他内容。" : notes::DisplayBody(*it);
         const auto text_page=raw_font::Paginate(body,416,
-            static_cast<size_t>(std::max(0,note_text_page_)),12,
+            static_cast<size_t>(std::max(0,note_text_page_)),notes_ui::kBodyRows,
             [](uint32_t cp){return raw_font::Lookup(ui_font_body,cp).advance;});
         note_text_pages_=static_cast<int>(text_page.pages);
         note_text_page_=static_cast<int>(text_page.page);
         for (size_t i=0;i<text_page.lines.size();++i)
-            DrawText(32,152+static_cast<int>(i)*40,text_page.lines[i].c_str(),ui_font_body);
+            DrawText(32,notes_ui::kBodyY+static_cast<int>(i)*notes_ui::kBodyPitch,text_page.lines[i].c_str(),ui_font_body);
         char page[32];std::snprintf(page,sizeof(page),"%d / %d",note_text_page_+1,note_text_pages_);
         DrawTextCentered(32,640,416,32,page,ui_font_small);
         for (int i=0;i<2;++i) {
@@ -93,17 +94,22 @@ void RawDisplay::DrawProductNotesLocked(bool detail) {
         DrawProductControlRailLocked("返回目录 / 语音整理，保留原文");
         return;
     }
-    notes_pages_=std::max(1,(static_cast<int>(items.size())+5)/6);
+    notes_pages_=std::max(1,(static_cast<int>(items.size())+notes_ui::kRows-1)/notes_ui::kRows);
     notes_page_=std::clamp(notes_page_,0,notes_pages_-1);
     std::fill(std::begin(note_ids_),std::end(note_ids_),0);
     char count[24];std::snprintf(count,sizeof(count),"%u / 8",static_cast<unsigned>(items.size()));
     DrawProductHeadingLocked(notes_query_.empty() ? "AI 笔记" : "搜索结果",count);
-    for (int row=0;row<6 && notes_page_*6+row<static_cast<int>(items.size());++row) {
-        const auto& note=items[notes_page_*6+row];note_ids_[row]=note.id;
+    for (int row=0;row<notes_ui::kRows && notes_page_*notes_ui::kRows+row<static_cast<int>(items.size());++row) {
+        const auto& note=items[notes_page_*notes_ui::kRows+row];note_ids_[row]=note.id;
         std::string stamp=note.updated ? reminders::LocalTime(note.updated).substr(5,11) : "时间未同步";
         if (!note.project.empty()) stamp=note.project+" / "+stamp;
         if (note.done) stamp="已处理 / "+stamp;
-        DrawProductIconRowLocked(144+row*80,lucide::Id::NotebookPen,note.title.c_str(),stamp.c_str(),navigation_index_==row);
+        const int y=notes_ui::kY+row*notes_ui::kPitch;
+        if(navigation_index_==row)FillRoundRect(32,y+12,40,40,12,true);
+        DrawProductIconLocked(lucide::Id::NotebookPen,38,y+18,28,navigation_index_!=row);
+        DrawProductLabelLocked(88,y+2,328,note.title.c_str(),ui_font_body);
+        DrawProductLabelLocked(88,y+44,328,stamp.c_str(),ui_font_small);
+        DrawProductChevronLocked(436,y+28);FillRect(88,y+notes_ui::kHeight-1,360,1,true);
     }
     if (items.empty()) {
         DrawProductIconLocked(lucide::Id::NotebookPen,220,216,40,true);
