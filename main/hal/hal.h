@@ -3,6 +3,7 @@
 #include "display.h"
 #include "dual_network_board.h"
 
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -98,7 +99,8 @@ public:
     // 发 AT 并收集应答；须在后台任务调用。
     bool BtSendCollect(const char* cmd, std::string& out, uint32_t timeout_ms = 2000);
     // ESP NimBLE 扫描周边 BLE；须在后台任务调用。结束后 deinit 释放。
-    bool BleScan(std::vector<HalBtDevice>& out, std::string& detail, uint32_t timeout_ms = 8000);
+    bool BleScan(std::vector<HalBtDevice>& out, std::string& detail, uint32_t timeout_ms = 8000,
+                 const std::function<bool()>& cancelled = {});
 
 private:
     Hal() = default;

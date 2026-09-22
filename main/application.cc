@@ -2,6 +2,7 @@
 #include "notes/note_service.h"
 #include "system/boot_diag.h"
 #include "system/device_control.h"
+#include "system/quick_controls.h"
 
 #include "board.h"
 #include "display.h"
@@ -102,6 +103,7 @@ void Application::Start() {
     if (event_task_result == pdPASS) {
         dashboard::DashboardService::GetInstance().Start();
         notes::Start();
+        device::QuickControls::Instance().Start();
         reminders::Service::Instance().Start();
         xiaozhi::Client::GetInstance().Start();
         boot_diag::Mark(boot_diag::Stage::kProvidersStarted);

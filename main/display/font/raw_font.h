@@ -11,8 +11,8 @@ struct Glyph {
     uint8_t bpp = 1;
     bool missing = false;
 };
-// Full HarmonyOS Sans SC face in font_data; the small embedded UI face remains
-// a recovery fallback when no pack is installed. No LVGL or runtime TTF engine.
+// Native-size HarmonyOS Sans SC UI bitmaps are preferred; font_data supplies
+// the remaining characters. Binary pixels only; no LVGL or runtime TTF engine.
 bool Init();
 bool InitMemory(const uint8_t* data, size_t size);
 bool Ready();

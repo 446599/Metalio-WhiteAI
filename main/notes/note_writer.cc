@@ -29,7 +29,11 @@ void Writer::Worker(void* arg) {
         if(job->note.id) {
             Patch patch;patch.title=job->note.title;patch.text=job->note.text;patch.project=job->note.project;
             ok=store.Update(job->note.id,job->note.revision,patch,stamp,saved,error);
-        } else {job->note.updated=stamp;ok=store.Put(job->note,saved,error);}
+        } else {
+            job->note.updated=stamp;
+            if(job->note.source_id.empty()) ok=store.Put(job->note,saved,error);
+            else {bool existed=false;ok=store.Archive(job->note,saved,existed,error);}
+        }
         {
             std::lock_guard<std::mutex> lock(job->owner->mutex_);
             auto& state=job->owner->state_;

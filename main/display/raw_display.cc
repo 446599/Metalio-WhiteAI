@@ -1,4 +1,7 @@
 #include "raw_display.h"
+#include "system/quick_controls.h"
+#include "input/gesture.h"
+#include "reader/reader_service.h"
 #include "network/wifi_setup.h"
 #include "notes/note_writer.h"
 #include "binary_refresh.h"
@@ -625,7 +628,13 @@ void RawDisplay::TouchTask() {
             const int x = touch_last_x_;
             const int y = touch_last_y_;
             touch_down_ = false;
-            if (tap) {
+            const int start_x=touch_start_x_,start_y=touch_start_y_;
+            const auto pull=input::ControlPull(start_x,start_y,x,y,static_cast<int>(held_ms),quick_controls_open_.load());
+            if(pull!=input::Pull::None) {
+                Application::GetInstance().ScheduleUi([this,start_x,start_y,x,y,held_ms]() {
+                    HandleQuickPull(start_x,start_y,x,y,static_cast<int>(held_ms));
+                });
+            } else if (tap) {
                 if (touch_start_y_ >= kTouchVirtualKeyMinY &&
                     touch_start_y_ <= kTouchVirtualKeyMaxY) {
                     const int home_distance = std::abs(x - static_cast<int>(TOUCH_VK_HOME_X));
@@ -651,7 +660,7 @@ void RawDisplay::TouchTask() {
 
 bool RawDisplay::HandleAiKey(bool down) {
     if (down) {
-        if (form_active_.load()) return false;
+        if (form_active_.load() || quick_controls_open_.load() || device::QuickControls::Instance().Snapshot().ble_busy) return false;
         if (xiaozhi::AudioSession::GetInstance().RecorderState().mode != audio::RecorderMode::Idle) return false;
         if (ai_key_down_.exchange(true)) return true;
         const bool accepted = xiaozhi::Client::GetInstance().ListenStart();
@@ -668,7 +677,7 @@ bool RawDisplay::HandleAiKey(bool down) {
 void RawDisplay::ShowAiConversation() {
     SetPowerSaveMode(false);
     DisplayLockGuard lock(this);
-    if (animation_running_.load() || form_active_.load()) return;
+    if (animation_running_.load() || form_active_.load() || quick_controls_open_.load()) return;
     screen_test_mode_ = false;
     test_console_mode_ = false;
     product_page_ = ProductPage::AiResult;
@@ -680,7 +689,9 @@ void RawDisplay::ShowAiConversation() {
 
 void RawDisplay::HandleHomeTap(int x, int y) {
     if (HandleReminderTap(x,y)) return;
+    if (HandleQuickTap(x,y)) return;
     if (HandleSetupTap(x,y)) return;
+    if (HandleReaderTap(x,y)) return;
     enum class Action { None, Gray4, PaperMono, PaperText, AnimDu, AnimFc, PaperPage };
     Action action = Action::None;
     int ai_action = -1;
@@ -737,19 +748,25 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                     break;
                 }
                 case ProductPage::AiResult:
-                case ProductPage::AiSteps:
-                    if (in_rect(344, 72, 104, 48)) ai_action = 4;
+                case ProductPage::AiSteps: {
+                    const auto state=xiaozhi::Conversation::GetInstance().Snapshot();
+                    const bool busy=state.state==xiaozhi::TurnState::Connecting || state.state==xiaozhi::TurnState::Listening ||
+                        state.state==xiaozhi::TurnState::Transcribing || state.state==xiaozhi::TurnState::Thinking || state.state==xiaozhi::TurnState::Speaking;
+                    if(in_rect(344,72,104,48) && busy) ai_action=4;
                     else if (in_rect(32, 288, 184, 48)) {
                         ai_show_transcript_ = !ai_show_transcript_;
                         ai_text_page_ = 0;
                         redraw = true;
                     } else {
                         for (int row = 0; row < 2; ++row) for (int col = 0; col < 2; ++col) {
-                            if (in_rect(kAiActionX[col], kAiActionY[row], kAiActionW, kAiActionH))
-                                ai_action = row * 2 + col;
+                            const int candidate=row*2+col;
+                            if(!busy && !state.transcript.empty() && !state.truncated &&
+                               (candidate!=3 || state.state==xiaozhi::TurnState::Done) &&
+                               in_rect(kAiActionX[col], kAiActionY[row], kAiActionW, kAiActionH)) ai_action=candidate;
                         }
                     }
                     break;
+                }
                 case ProductPage::QuickNote:
                     if (in_rect(kUiInset, 504, kUiContentWidth, 64)) {
                         restore_capsule = true;
@@ -824,8 +841,10 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                     int count = 0;
                     for (const auto& card : snapshot.custom) if (card.enabled) ++count;
                     for (const auto& summary : snapshot.ai_summary) if (summary[0]) ++count;
-                    if (ProductRowAt(x, y, std::min(count, 3), kUiCardPitch, kUiCardHeight) >= 0)
-                        next_page = ProductPage::CardDetail;
+                    const int selected=ProductRowAt(x,y,std::min(count,3),kUiCardPitch,kUiCardHeight);
+                    if(selected>=0) {
+                        if(SelectCardSnapshotLocked(selected)) next_page=ProductPage::CardDetail;
+                    }
                     break;
                 }
                 case ProductPage::Keep:
@@ -901,7 +920,7 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                 ShowNotification("暂不可操作，请等待当前回答或先说话", 4000);
             }
         } else if (ai_action == 3) {
-            client.SaveCapsule();
+            OpenConversationNote();
         } else {
             (void)client.Abort();
         }
@@ -916,8 +935,12 @@ void RawDisplay::HandleHomeTap(int x, int y) {
 
 bool RawDisplay::HandleHardwareKey(HardwareKey key) {
     if (reminders::Service::Instance().IsActive()) return true;
+    if (HandleQuickKey(key)) return true;
     if (HandleSetupKey(key)) return true;
+    if (HandleReaderKey(key)) return true;
     bool scan_wifi = false;
+    bool open_controls = false;
+    bool restore_recent_capsule = false;
     bool refresh_tap = false;
     bool wake = false;
     bool redraw = false;
@@ -1012,9 +1035,6 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                     } else if ((product_page_ == ProductPage::AiResult || product_page_ == ProductPage::AiSteps) && ai_text_page_ > 0) {
                         --ai_text_page_;
                         redraw = true;
-                    } else if (product_page_ == ProductPage::Reader && reader_page_ > 0) {
-                        --reader_page_;
-                        redraw = true;
                     } else {
                         parent_page();
                     }
@@ -1026,11 +1046,6 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                     } else if (product_page_ == ProductPage::Apps) {
                         navigation_index_ = (navigation_index_ + 1) % 7;
                         redraw = true;
-                    } else if (product_page_ == ProductPage::Reader) {
-                        if (reader_page_ < 2) {
-                            ++reader_page_;
-                            redraw = true;
-                        }
                     } else if (product_page_==ProductPage::Notes) {
                         if (navigation_index_<5 && note_ids_[navigation_index_+1]) ++navigation_index_;
                         else {notes_page_=(notes_page_+1)%notes_pages_;navigation_index_=0;}
@@ -1038,7 +1053,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                     } else if (product_page_==ProductPage::NoteDetail) {
                         if (note_text_page_+1<note_text_pages_) {++note_text_page_;redraw=true;}
                     } else if (product_page_ == ProductPage::QuickNote) {
-                        set_page(ProductPage::AiResult);
+                        set_page(ProductPage::AiResult);restore_recent_capsule=true;
                     } else if (product_page_ == ProductPage::AiResult || product_page_ == ProductPage::AiSteps) {
                         if (ai_text_page_ + 1 < ai_page_count_) { ++ai_text_page_; redraw = true; }
                     } else if (product_page_ == ProductPage::TodayList) {
@@ -1046,7 +1061,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                     } else if (product_page_ == ProductPage::Alarm) {
                         alarm_page_=(alarm_page_+1)%alarm_pages_; redraw=true;
                     } else if (product_page_ == ProductPage::CardBox) {
-                        set_page(ProductPage::CardDetail);
+                        if(SelectCardSnapshotLocked(navigation_index_)) set_page(ProductPage::CardDetail);
                     } else if (product_page_ == ProductPage::CardDetail) {
                         set_page(ProductPage::Keep);
                     } else if (product_page_ == ProductPage::Keep) {
@@ -1066,15 +1081,13 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                     }
                     else if (product_page_ == ProductPage::AiResult) { ai_show_transcript_ = !ai_show_transcript_; ai_text_page_ = 0; redraw = true; }
                     else if (product_page_ == ProductPage::AiSteps) {
-                        // BOOT confirms the highlighted AI plan and stores it
-                        // as a card, matching the old "存卡片" action.
-                        set_page(ProductPage::CardDetail);
+                        ai_show_transcript_=!ai_show_transcript_;ai_text_page_=0;redraw=true;
                     } else if (product_page_ == ProductPage::QuickNote) {
-                        set_page(ProductPage::AiResult);
+                        set_page(ProductPage::AiResult);restore_recent_capsule=true;
                     } else if (product_page_ == ProductPage::Reader) {
                         set_page(ProductPage::Apps);
                     } else if (product_page_ == ProductPage::CardBox) {
-                        set_page(ProductPage::CardDetail);
+                        if(SelectCardSnapshotLocked(navigation_index_)) set_page(ProductPage::CardDetail);
                     } else if (product_page_ == ProductPage::CardDetail) {
                         set_page(ProductPage::Keep);
                     } else if (product_page_ == ProductPage::Keep) {
@@ -1082,7 +1095,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                         set_page(ProductPage::Home);
                     } else if (product_page_ == ProductPage::Confirmation) {
                         set_page(ProductPage::QuickNote);
-                        hardware_notice = "此处是演示，请通过提醒工具保存";
+                        hardware_notice = "打开最近胶囊后，选择存为笔记";
                     } else if (product_page_ == ProductPage::More) {
                         switch (navigation_index_ % 5) {
                             case 0:
@@ -1092,7 +1105,7 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                             case 2: refresh_tap = true; break;
                             case 3: set_page(ProductPage::Settings); break;
                             default:
-                                test_console_mode_=true; DrawTestConsoleLocked(); FlushLocked(); redraw=false; break;
+                                open_controls=true; break;
                         }
                     }
 
@@ -1110,6 +1123,8 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
         SetPowerSaveMode(false);
         return true;
     }
+    if(restore_recent_capsule) xiaozhi::Client::GetInstance().RestoreCapsule();
+    if (open_controls) SetQuickControls(true);
     if (scan_wifi) (void)network::WifiSetup::Instance().Scan();
     if (refresh_tap) {
         dashboard::DashboardService::GetInstance().RefreshNow();
@@ -1178,7 +1193,7 @@ void RawDisplay::FrameDumpTask() {
         // other in-page taps as candidates and let HandleHomeTap apply the
         // page-specific hit map; this keeps serial touch injection in sync
         // with the physical touch task as new pages are added.
-        return x >= kUiInset && x < kUiInset + kUiContentWidth && y >= kUiTitleY &&
+        return x >= kUiInset && x < kUiInset + kUiContentWidth && y >= 0 &&
                y < kPortraitH;
     };
     auto dispatch_cover_key = [this](int x, int y) {
@@ -1238,10 +1253,11 @@ void RawDisplay::FrameDumpTask() {
         const int dy = serial_touch_last_y - serial_touch_start_y;
         const int64_t held_us = esp_timer_get_time() - serial_touch_start_us;
         const bool tap = held_us <= 800000 && std::abs(dx) <= 32 && std::abs(dy) <= 32;
-        if (tap) {
+        const bool pulled=HandleQuickPull(serial_touch_start_x,serial_touch_start_y,x,y,static_cast<int>(held_us/1000));
+        if (tap && !pulled) {
             if (!dispatch_cover_key(x, y)) HandleHomeTap(x, y);
         }
-        send_touch_ack("up", x, y, dx, tap, false);
+        send_touch_ack("up", x, y, dx, tap || pulled, false);
         serial_touch_down = false;
         serial_touch_start_us = 0;
     };
@@ -2281,7 +2297,7 @@ void RawDisplay::ShowProductHomeScreen() {
     product_page_ = ProductPage::Home;
     navigation_index_ = 0;
     quick_note_state_ = 0;
-    reader_page_ = 0;
+    book_list_page_ = 0;
     bool discharging = false;
     Board::GetInstance().GetBatteryLevel(battery_percent_, charging_, discharging);
     last_dashboard_revision_ = 0;
@@ -2599,7 +2615,7 @@ void RawDisplay::DrawProductControlRailLocked(const char* context) {
     // One passive line. The capacitive cover keys and BOOT retain their routes;
     // there are no on-screen footer buttons or invisible footer hit targets.
     FillRect(kUiInset, kUiRailY, kUiContentWidth, 1, true);
-    const bool notice = !form_active_.load() && notification_text_[0] != '\0' &&
+    const bool notice = !quick_controls_open_.load() && !form_active_.load() && product_page_!=ProductPage::Reader && notification_text_[0] != '\0' &&
                         notification_deadline_ms_ > esp_timer_get_time() / 1000;
     const char* hint = notice ? notification_text_ :
                        (context ? context : "HOME 首页 / PREV 返回 / NEXT 下一项");
@@ -2779,8 +2795,6 @@ void RawDisplay::DrawProductAiLocked(bool details) {
         DrawProductControlRailLocked("HOME 首页 / 等待绑定完成");
         return;
     }
-    StrokeRoundRect(344, 72, 104, 48, 24, 1);
-    DrawTextCentered(344, 72, 104, 48, "停止", ui_font_small);
     const auto snapshot = xiaozhi::Conversation::GetInstance().Snapshot();
     if (ai_drawn_turn_ != snapshot.turn) {
         ai_drawn_turn_ = snapshot.turn;
@@ -2793,6 +2807,9 @@ void RawDisplay::DrawProductAiLocked(bool details) {
     const bool busy = snapshot.state == xiaozhi::TurnState::Connecting || listening ||
                       snapshot.state == xiaozhi::TurnState::Transcribing ||
                       snapshot.state == xiaozhi::TurnState::Thinking || snapshot.state == xiaozhi::TurnState::Speaking;
+    if(busy) {
+        StrokeRoundRect(344,72,104,48,24,1);DrawTextCentered(344,72,104,48,"停止",ui_font_small);
+    }
     if (listening) FillCircle(40, 157, 6, true);
     else StrokeCircle(40, 157, 6, 1);
     DrawProductLabelLocked(60, 140, 388, states[static_cast<unsigned>(snapshot.state)], ui_font_status);
@@ -2835,15 +2852,17 @@ void RawDisplay::DrawProductAiLocked(bool details) {
         }
     }
     if (snapshot.truncated) DrawText(kUiInset, 586, "内容较长，已保留前段", ui_font_small);
-    const char* save_label = snapshot.saved ? "已保存" : snapshot.saving_revision ? "保存中" :
-                             snapshot.save_failed ? "保存失败 · 重试" : "保存胶囊";
-    const char* labels[] = {busy ? "整理 · 请稍候" : "整理灵感",
-                            busy ? "待办 · 请稍候" : "提炼待办",
-                            busy ? "翻译 · 请稍候" : "翻译英文", save_label};
-    for (int i = 0; i < 4; ++i) {
-        const int x = kAiActionX[i % 2], y = kAiActionY[i / 2];
-        StrokeRoundRect(x, y, kAiActionW, kAiActionH, 24, 1);
-        DrawTextCentered(x, y, kAiActionW, kAiActionH, labels[i], ui_font_status);
+    if(!busy && !snapshot.transcript.empty() && !snapshot.truncated) {
+        const char* labels[]={"整理灵感","待办草稿","翻译英文","存为笔记"};
+        for(int i=0;i<4;++i) {
+            if(i==3 && snapshot.state!=xiaozhi::TurnState::Done)continue;
+            const int x=kAiActionX[i%2],y=kAiActionY[i/2];
+            StrokeRoundRect(x,y,kAiActionW,kAiActionH,24,1);
+            DrawTextCentered(x,y,kAiActionW,kAiActionH,labels[i],ui_font_status);
+        }
+    } else {
+        DrawProductLabelLocked(32,632,416,busy ? "回答完成后可整理、翻译和存笔记" : "先按住机身 AI 键，说出你的想法",ui_font_small);
+        DrawProductLabelLocked(32,684,416,"待办仅生成草稿，不自动创建提醒",ui_font_small);
     }
     DrawProductControlRailLocked(busy ? "AI 键松手结束 / HOME 首页" : "HOME 首页 / PREV 上页 / NEXT 下页");
 }
@@ -2861,28 +2880,7 @@ void RawDisplay::DrawProductQuickNoteLocked() {
     DrawProductControlRailLocked(nullptr);
 }
 
-void RawDisplay::DrawProductReaderLocked() {
-    std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked();
-    const uint8_t page = std::min<uint8_t>(reader_page_, 2);
-    char progress[16];
-    std::snprintf(progress, sizeof(progress), "%02u / 03", static_cast<unsigned>(page + 1));
-    DrawProductHeadingLocked("阅读", progress);
-    static constexpr const char* lines[3][10] = {
-        {"第一章  从一件小事开始", "", "今天只做一件重要的事。", "把目标写下来，再把它拆成", "可以马上完成的小步。", "", "完成一小步以后，停下来", "看看下一步是否仍然清楚。", "", ""},
-        {"第二章  保持连续", "", "稳定的节奏比偶尔的冲刺", "更容易留下真正的进展。", "把注意力放回当前一页，", "让工具安静地服务于阅读。", "", "", "", ""},
-        {"第三章  记录结果", "", "在一天结束以前记下结果，", "明天就不必从头寻找方向。", "一张卡片足够承接一个想法。", "", "", "", "", ""},
-    };
-    for (int i = 0; i < 10; ++i) {
-        DrawProductLabelLocked(kUiInset, 172 + i * 44, kUiContentWidth,
-                               lines[page][i], i == 0 ? ui_font_status : ui_font_body);
-    }
-    for (int i = 0; i < 3; ++i) {
-        if (i == page) FillCircle(220 + i * 20, 704, 4, true);
-        else StrokeCircle(220 + i * 20, 704, 4, 1);
-    }
-    DrawProductControlRailLocked("HOME 首页 / PREV 上一页 / NEXT 下一页");
-}
+
 
 void RawDisplay::DrawProductTodayListLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
@@ -2987,28 +2985,29 @@ void RawDisplay::DrawProductCardBoxLocked() {
     DrawProductControlRailLocked(nullptr);
 }
 
+bool RawDisplay::SelectCardSnapshotLocked(int selected) {
+    const auto snapshot=dashboard::DashboardData::GetInstance().GetSnapshot();int row=0;
+    for(const auto& card:snapshot.custom) if(card.enabled && row++==selected){selected_card_title_=card.title;selected_card_text_=card.value;return true;}
+    for(const auto& summary:snapshot.ai_summary) if(summary[0] && row++==selected){selected_card_title_="AI 摘要";selected_card_text_=summary;return true;}
+    return false;
+}
+
 void RawDisplay::DrawProductCardDetailLocked() {
-    std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked();
-    DrawProductHeadingLocked("卡片详情", "01");
-    DrawText(kUiInset, 168, "来源 / 小智 AI 结果", ui_font_small);
-    DrawText(kUiInset, 228, "整理今天的工作重点", ui_font_body);
-    DrawText(kUiInset, 304, "今天先完成最重要的一件事，", ui_font_status);
-    DrawText(kUiInset, 344, "完成后再安排下一步。", ui_font_status);
-    FillRect(kUiInset, 448, kUiContentWidth, 1, true);
-    DrawText(kUiInset, 470, "创建时间 / 刚刚", ui_font_small);
-    DrawText(kUiInset, 680, "NEXT 留屏", ui_font_small);
-    DrawProductControlRailLocked(nullptr);
+    std::memset(portrait_fb_,kWhite,portrait_size_);DrawProductStatusBarLocked();
+    DrawProductHeadingLocked("卡片详情","");
+    DrawProductLabelLocked(32,168,416,selected_card_title_.empty()?"未选择卡片":selected_card_title_.c_str(),ui_font_body);
+    const auto page=raw_font::Paginate(selected_card_text_,416,0,10,[](uint32_t cp){return raw_font::Lookup(ui_font_body,cp).advance;});
+    for(size_t i=0;i<page.lines.size();++i)DrawText(32,228+i*40,page.lines[i].c_str(),ui_font_body);
+    DrawProductLabelLocked(32,648,416,"来源 / 设备当前快照，非历史归档",ui_font_small);
+    DrawProductControlRailLocked(selected_card_text_.empty()?"PREV 返回卡片列表":"NEXT 留屏 / PREV 返回卡片列表");
 }
 
 void RawDisplay::DrawProductKeepLocked() {
-    std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawText(kUiInset, 32, "MIAO / INK", ui_font_small);
-    DrawText(kUiInset, 160, "整理今天的工作重点", ui_font_title);
-    FillRect(kUiInset, 244, 48, 2, true);
-    DrawText(kUiInset, 288, "今天先完成最重要的一件事，", ui_font_status);
-    DrawText(kUiInset, 328, "完成后再安排下一步。", ui_font_status);
-    DrawText(kUiInset, 648, "留屏 / 小智 AI 结果", ui_font_small);
+    std::memset(portrait_fb_,kWhite,portrait_size_);DrawText(32,32,"MIAO / INK",ui_font_small);
+    DrawProductLabelLocked(32,160,416,selected_card_title_.empty()?"留屏":selected_card_title_.c_str(),ui_font_title);
+    FillRect(32,244,48,2,true);
+    const auto page=raw_font::Paginate(selected_card_text_,416,0,9,[](uint32_t cp){return raw_font::Lookup(ui_font_body,cp).advance;});
+    for(size_t i=0;i<page.lines.size();++i)DrawText(32,288+i*38,page.lines[i].c_str(),ui_font_body);
     DrawProductControlRailLocked("点击屏幕或按键返回首页");
 }
 
@@ -3036,38 +3035,26 @@ void RawDisplay::DrawProductWorkbenchLocked() {
 }
 
 void RawDisplay::DrawProductSettingsLocked() {
-    std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked();
-    DrawProductHeadingLocked("系统信息", "INFO");
-    const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
-    const char* items[] = {"布局方向", "网络连接", "省电策略", "关于设备"};
-    const char* values[] = {"竖屏", snapshot.network, "自动", "MIAO / INK"};
-    for (int i = 0; i < 4; ++i) {
-        DrawText(32, 152 + i * 120, items[i], ui_font_small);
-        DrawProductLabelLocked(32, 192 + i * 120, 416, values[i], ui_font_body);
-    }
-    DrawProductControlRailLocked(nullptr);
+    std::memset(portrait_fb_,kWhite,portrait_size_);DrawProductStatusBarLocked();DrawProductHeadingLocked("系统信息","INFO");
+    const auto dashboard=dashboard::DashboardData::GetInstance().GetSnapshot();
+    const auto system=device::QuickControls::Instance().Snapshot();
+    const char* items[]={"界面字体","网络连接","固件版本","显示方式"};
+    const char* values[]={"HarmonyOS Sans SC",dashboard.network,system.version.empty()?"未知":system.version.c_str(),"竖屏 / 纯黑白 / 无灰阶"};
+    for(int i=0;i<4;++i){DrawText(32,152+i*120,items[i],ui_font_small);DrawProductLabelLocked(32,192+i*120,416,values[i],ui_font_body);}
+    DrawProductControlRailLocked("字体按实际字号显示 / 顶部下拉控制栏");
 }
 
 void RawDisplay::DrawProductConfirmationLocked() {
-    std::memset(portrait_fb_, kWhite, portrait_size_);
-    DrawProductStatusBarLocked();
-    DrawProductHeadingLocked("请确认", "NOTE");
-    DrawText(kUiInset, 192, "任务尚未创建", ui_font_body);
-    DrawText(kUiInset, 256, "确认草稿后才会加入今日清单。", ui_font_status);
-    DrawText(kUiInset, 312, "保存原文和整理结果", ui_font_small);
-    DrawText(kUiInset, 344, "不会自动创建任务。", ui_font_small);
-    FillRect(kUiInset, 424, kUiContentWidth, 1, true);
-    DrawText(kUiInset, 464, "PREV 返回编辑 / AI 键说话", ui_font_status);
-    DrawProductControlRailLocked(nullptr);
+    // Retained only as a legacy enum value; no menu exposes a fake task action.
+    DrawProductQuickNoteLocked();
 }
 
 void RawDisplay::DrawProductMoreLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
     DrawProductStatusBarLocked();
     DrawProductHeadingLocked("设备设置", "设置");
-    static constexpr const char* items[] = {"Wi-Fi", "设备状态", "刷新数据", "系统信息", "屏幕测试"};
-    static constexpr const char* details[] = {"扫描网络、输入密码", "网络、天气与额度", "重新获取天气与额度", "布局、连接与省电", "高级显示诊断"};
+    static constexpr const char* items[] = {"Wi-Fi", "设备状态", "刷新数据", "系统信息", "控制中心"};
+    static constexpr const char* details[] = {"扫描网络、输入密码", "网络、天气与额度", "重新获取天气与额度", "字体、版本与连接", "音量、蓝牙、铃声与震动"};
     static constexpr lucide::Id icons[]={lucide::Id::Settings2,lucide::Id::Info,lucide::Id::RefreshCw,lucide::Id::Settings2,lucide::Id::Monitor};
     for (int i=0;i<5;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],items[i],details[i],navigation_index_==i);
     DrawProductControlRailLocked("PREV 返回首页 / NEXT 选择项目");
@@ -3082,13 +3069,16 @@ void RawDisplay::DrawProductScreenLocked() {
     last_notes_revision_ = notes::DeviceStore().Revision();
     last_wifi_revision_ = network::WifiSetup::Instance().Revision();
     last_writer_revision_ = notes::Writer::Instance().Snapshot().revision;
+    last_quick_revision_ = device::QuickControls::Instance().Revision();
+    last_reader_revision_ = reader::Service::Instance().Revision();
     AdvanceFormsLocked();
     if (reminder_alert_.active) {
-        password_reveal_=false;
+        password_reveal_=false;quick_controls_open_.store(false);
         DrawReminderAlertLocked();
         return;
     }
     if (discard_pending_) {DrawProductDiscardLocked();return;}
+    if (quick_controls_open_.load()) {DrawProductQuickControlsLocked();return;}
     switch (product_page_) {
         case ProductPage::Home: DrawProductHomeLocked(); break;
         case ProductPage::AiResult: DrawProductAiLocked(false); break;
@@ -4382,6 +4372,7 @@ void RawDisplay::ShowWipeTestPattern() {
 }
 
 void RawDisplay::UpdateStatusBar(bool update_all) {
+    if(quick_controls_open_.load()) device::QuickControls::Instance().Refresh();
     DisplayLockGuard lock(this);
     if (!portrait_fb_) return;
     if (test_console_mode_) return;
@@ -4416,7 +4407,9 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
         xiaozhi::Conversation::GetInstance().Revision() == last_conversation_revision_ &&
         xiaozhi::AudioSession::GetInstance().RecorderState().revision == last_recorder_revision_ && !notification_expired && notes::DeviceStore().Revision()==last_notes_revision_ &&
         network::WifiSetup::Instance().Revision()==last_wifi_revision_ &&
-        notes::Writer::Instance().Snapshot().revision==last_writer_revision_) return;
+        notes::Writer::Instance().Snapshot().revision==last_writer_revision_ &&
+        device::QuickControls::Instance().Revision()==last_quick_revision_ &&
+        reader::Service::Instance().Revision()==last_reader_revision_) return;
     last_minute_ = tmv.tm_min;
     last_drawn_battery_ = battery_percent_;
     last_drawn_charging_ = charging_;
