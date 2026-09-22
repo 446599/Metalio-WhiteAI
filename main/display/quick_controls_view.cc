@@ -1,0 +1,117 @@
+#include "raw_display.h"
+#include "system/quick_controls.h"
+#include "input/keyboard_layout.h"
+#include "input/gesture.h"
+#include "network/wifi_setup.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+
+void RawDisplay::SetQuickControls(bool open) {
+    if(open) device::QuickControls::Instance().Refresh();
+    {
+        DisplayLockGuard lock(this);
+        if(!portrait_fb_ || screen_test_mode_ || test_console_mode_ || power_save_ || reminder_alert_.active || discard_pending_) return;
+        quick_controls_open_.store(open);quick_bluetooth_=false;quick_ble_page_=0;
+        password_reveal_=false;
+        DrawHomeScreenLocked();FlushLocked();
+    }
+    if(!open) device::QuickControls::Instance().CancelBluetooth();
+}
+bool RawDisplay::HandleQuickPull(int x0,int y0,int x1,int y1,int held_ms) {
+    const auto pull=input::ControlPull(x0,y0,x1,y1,held_ms,quick_controls_open_.load());
+    if(pull==input::Pull::None) return false;
+    SetQuickControls(pull==input::Pull::Open);return true;
+}
+bool RawDisplay::HandleQuickKey(HardwareKey key) {
+    if(!quick_controls_open_.load()) return false;
+    if(key==HardwareKey::Home || key==HardwareKey::Back || key==HardwareKey::Previous) SetQuickControls(false);
+    else if(key==HardwareKey::Next) {
+        DisplayLockGuard lock(this);
+        if(quick_bluetooth_) ++quick_ble_page_;
+        DrawHomeScreenLocked();FlushLocked();
+    }
+    return true;
+}
+bool RawDisplay::HandleQuickTap(int x,int y) {
+    {DisplayLockGuard lock(this);if(screen_test_mode_ || test_console_mode_ || power_save_ || reminder_alert_.active || discard_pending_) return false;}
+    if(!quick_controls_open_.load()) {
+        if(input::Inside(x,y,32,0,416,64)){SetQuickControls(true);return true;}
+        return false;
+    }
+    enum class Action {None,Close,Volume,Ring,Vibration,Network,Scan,Cancel};
+    Action action=Action::None;int volume=0;bool ring=true,vibration=true;bool busy_form=false;
+    {
+        DisplayLockGuard lock(this);
+        if(reminder_alert_.active) return false;
+        const auto hit=[&](int l,int t,int w,int h){return input::Inside(x,y,l,t,w,h);};
+        const auto state=device::QuickControls::Instance().Snapshot();
+        ring=state.ring;vibration=state.vibration;
+        if(hit(344,72,104,48) || hit(32,688,416,48)) action=Action::Close;
+        else if(quick_bluetooth_) {
+            if(hit(32,608,200,56)) action=state.ble_busy ? Action::Cancel : Action::Scan;
+            else if(hit(248,608,200,56)) ++quick_ble_page_;
+        } else if(hit(32,192,56,56)){volume=state.volume-10;action=Action::Volume;}
+        else if(hit(392,192,56,56)){volume=state.volume+10;action=Action::Volume;}
+        else if(hit(96,192,288,56)){volume=((x-96)*100+144)/288;action=Action::Volume;}
+        else if(hit(32,280,416,64)) {
+            if(form_active_.load()) busy_form=true;
+            else {quick_controls_open_.store(false);product_page_=ProductPage::WifiList;wifi_page_=0;wifi_switch_confirm_=false;navigation_index_=0;form_message_.clear();action=Action::Network;}
+        } else if(hit(32,360,416,64)){quick_bluetooth_=true;quick_ble_page_=0;}
+        else if(hit(32,456,200,64)){ring=!ring;action=Action::Ring;}
+        else if(hit(248,456,200,64)){vibration=!vibration;action=Action::Vibration;}
+        if(action!=Action::Close){DrawHomeScreenLocked();FlushLocked();}
+    }
+    auto& controls=device::QuickControls::Instance();
+    if(action==Action::Close) SetQuickControls(false);
+    else if(action==Action::Volume) controls.SetVolume(volume);
+    else if(action==Action::Ring || action==Action::Vibration) controls.SetAlerts(ring,vibration);
+    else if(action==Action::Network){controls.CancelBluetooth();(void)network::WifiSetup::Instance().Scan();}
+    else if(action==Action::Scan) controls.ScanBluetooth();
+    else if(action==Action::Cancel) controls.CancelBluetooth();
+    if(busy_form) ShowNotification("请先完成或取消当前输入，再打开网络设置",3000);
+    if(action!=Action::None && action!=Action::Close) UpdateStatusBar(true);
+    return true;
+}
+void RawDisplay::DrawProductQuickControlsLocked() {
+    std::memset(portrait_fb_,0xff,portrait_size_);DrawProductStatusBarLocked();
+    DrawProductHeadingLocked(quick_bluetooth_ ? "蓝牙发现" : "控制中心","");
+    const auto state=device::QuickControls::Instance().Snapshot();
+    const auto button=[&](int x,int y,int w,int h,const char* label){StrokeRoundRect(x,y,w,h,12,1);DrawTextCentered(x,y,w,h,label,ui_font_small);};
+    button(344,72,104,48,"收起");
+    if(quick_bluetooth_) {
+        DrawProductLabelLocked(32,136,416,"BLE 扫描；不切换外置音频模块",ui_font_small);
+        const int pages=std::max(1,(static_cast<int>(state.nearby.size())+4)/5);
+        quick_ble_page_=quick_ble_page_%pages;
+        for(int row=0;row<5;++row){
+            const auto index=static_cast<size_t>(quick_ble_page_*5+row);if(index>=state.nearby.size()) break;
+            const auto& item=state.nearby[index];const int y=192+row*72;
+            DrawProductLabelLocked(32,y,416,item.name.c_str(),ui_font_small);
+            char detail[64];std::snprintf(detail,sizeof(detail),"%s / %d dBm",item.address.c_str(),item.rssi);
+            DrawProductLabelLocked(32,y+30,416,detail,ui_font_small);
+        }
+        if(state.nearby.empty()) DrawProductLabelLocked(32,240,416,state.ble_busy ? "正在寻找附近设备…" : "点击扫描以获取附近设备",ui_font_body);
+        DrawProductLabelLocked(32,560,416,state.message.c_str(),ui_font_small);
+        button(32,608,200,56,state.ble_busy ? "停止扫描" : "扫描蓝牙");
+        char pages_text[32];std::snprintf(pages_text,sizeof(pages_text),"%d/%d 下一页",quick_ble_page_+1,pages);
+        button(248,608,200,56,pages_text);
+    } else {
+        char text[64];std::snprintf(text,sizeof(text),"播放音量 / %d%%",state.volume);
+        DrawProductLabelLocked(32,144,416,text,ui_font_small);
+        button(32,192,56,56,"−");button(392,192,56,56,"+");
+        StrokeRoundRect(96,208,288,24,8,1);
+        const int fill=std::clamp(state.volume,0,100)*280/100;
+        if(fill) FillRect(100,212,fill,16,true);
+        button(32,280,416,64,"");DrawProductLabelLocked(48,288,384,"网络 · 点击设置",ui_font_small);
+        DrawProductLabelLocked(48,316,384,state.network.c_str(),ui_font_small);
+        button(32,360,416,64,"蓝牙 · 扫描附近 BLE 设备");
+        DrawText(32,428,"闹钟与日程的提醒方式",ui_font_small);
+        button(32,456,200,64,state.ring ? "铃声 · 开" : "铃声 · 关");
+        button(248,456,200,64,state.vibration ? "震动 · 开" : "震动 · 关");
+        DrawProductLabelLocked(32,544,416,state.message.empty() ? "关闭铃声与震动后仍显示提醒卡片" : state.message.c_str(),ui_font_small);
+        DrawProductLabelLocked(32,588,416,"音量为 0 时，语音与铃声均静音",ui_font_small);
+        DrawProductLabelLocked(32,624,416,form_active_.load() ? "编辑中：请先完成或取消，再设置网络" : "输入草稿保留；闹钟始终优先",ui_font_small);
+    }
+    button(32,688,416,48,"收起控制栏");
+    DrawProductControlRailLocked("上滑或 HOME 收起 / 设置即时生效");
+}

@@ -53,7 +53,7 @@ bool RawDisplay::OpenSystemApp(const std::string& app,const std::string& date) {
     bool wake=false;
     {
         DisplayLockGuard lock(this);
-        if (!portrait_fb_ || reminder_alert_.active || form_active_.load() || discard_pending_) return false;
+        if (!portrait_fb_ || reminder_alert_.active || form_active_.load() || discard_pending_ || quick_controls_open_.load()) return false;
         if (product_page_==ProductPage::Recorder && entry->page!=product_page_) xiaozhi::AudioSession::GetInstance().StopRecorder();
         screen_test_mode_=false;test_console_mode_=false;wake=power_save_;power_save_=false;
         product_page_=entry->page;app_parent_=ProductPage::Apps;navigation_index_=0;

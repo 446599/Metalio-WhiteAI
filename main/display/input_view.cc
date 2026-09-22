@@ -5,11 +5,23 @@
 #include "network/wifi_setup.h"
 #include "notes/note_service.h"
 #include "notes/note_writer.h"
+#include "notes/conversation_note.h"
 #include "hal/hal.h"
 #include "application.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+
+void RawDisplay::OpenConversationNote() {
+    notes::Note draft;std::string message;
+    const auto source=xiaozhi::Conversation::GetInstance().Snapshot();
+    if(!notes::PrepareConversationNote(source,draft,message)){ShowNotification(message.c_str(),4000);return;}
+    DisplayLockGuard lock(this);
+    if(form_active_.load() || reminder_alert_.active || quick_controls_open_.load())return;
+    draft_note_=std::move(draft);draft_dirty_=true;note_save_operation_=0;form_message_=message;
+    product_page_=ProductPage::NoteCompose;form_active_.store(true);
+    DrawHomeScreenLocked();FlushLocked();
+}
 
 void RawDisplay::ClearFormLocked() {
     editor_.Clear();input::Wipe(wifi_password_);draft_note_={};form_message_.clear();
@@ -98,14 +110,18 @@ bool RawDisplay::HandleSetupTap(int x,int y) {
                 if(hit(key.x,key.y,key.w,key.h)) {editor_.Type(key.value);letter=true;break;}
             }
             if(!letter) {
-                if(hit(32,592,92,56)) {
+                const auto erase=input::BackspaceKey(editor_.CurrentMode());
+                const auto shift=input::ShiftKey();
+                if(hit(erase.x,erase.y,erase.w,erase.h)) editor_.Backspace();
+                else if(editor_.CurrentMode()!=input::Mode::Symbols && hit(shift.x,shift.y,shift.w,shift.h))
+                    editor_.SetMode(editor_.CurrentMode()==input::Mode::Upper ? input::Mode::Lower : input::Mode::Upper);
+                else if(hit(32,592,92,56)) {
                     const auto mode=editor_.CurrentMode();
                     editor_.SetMode(mode==input::Mode::Lower ? input::Mode::Upper : mode==input::Mode::Upper && !editor_.Secret() ? input::Mode::Pinyin : input::Mode::Lower);
                 } else if(hit(128,592,80,56)) {
                     if(editor_.CurrentMode()==input::Mode::Symbols) symbols_second_=!symbols_second_;
                     else {symbols_second_=false;editor_.SetMode(input::Mode::Symbols);}
-                } else if(hit(212,592,128,56)) editor_.Space();
-                else if(hit(344,592,104,56)) editor_.Backspace();
+                } else if(hit(212,592,editor_.CurrentMode()==input::Mode::Symbols ? 128 : 236,56)) editor_.Space();
                 else if(hit(248,304,56,40)) editor_.Move(-1);
                 else if(hit(312,304,56,40)) editor_.Move(1);
                 else if(hit(376,304,72,40)) {
@@ -236,7 +252,18 @@ void RawDisplay::DrawProductTextEntryLocked() {
     for(const auto& key:input::LetterKeys(editor_.CurrentMode(),symbols_second_)) button(key.x,key.y,key.w,key.h,key.label.c_str());
     const char* mode=editor_.CurrentMode()==input::Mode::Pinyin ? "中文" : editor_.CurrentMode()==input::Mode::Upper ? "ABC" : "abc";
     button(32,592,92,56,mode);button(128,592,80,56,editor_.CurrentMode()==input::Mode::Symbols ? "更多" : "123");
-    button(212,592,128,56,"空格");button(344,592,104,56,"退格");
+    button(212,592,editor_.CurrentMode()==input::Mode::Symbols ? 128 : 236,56,"空格");
+    if(editor_.CurrentMode()!=input::Mode::Symbols) {
+        const auto shift=input::ShiftKey();button(shift.x,shift.y,shift.w,shift.h,"↑");
+    }
+    // Familiar backspace keycap to the right of M. Draw the icon as geometry
+    // so it never depends on a special Unicode glyph being present.
+    const auto erase=input::BackspaceKey(editor_.CurrentMode());
+    button(erase.x,erase.y,erase.w,erase.h,"");
+    const int cx=erase.x+erase.w/2,cy=erase.y+erase.h/2;
+    StrokeRect(cx-9,cy-9,24,18,1);
+    for(int i=0;i<=9;++i) {SetPixel(cx-18+i,cy-i,true);SetPixel(cx-18+i,cy+i,true);}
+    for(int i=-4;i<=4;++i) {SetPixel(cx+3+i,cy+i,true);SetPixel(cx+3+i,cy-i,true);}
     const auto& error=form_message_.empty() ? editor_.Error() : form_message_;
     DrawProductLabelLocked(32,652,416,error.c_str(),ui_font_small);
     button(32,688,200,48,"取消");button(248,688,200,48,"完成");

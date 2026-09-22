@@ -1,4 +1,5 @@
 #include "reminder_service.h"
+#include "system/quick_controls.h"
 #include "application.h"
 #include "board.h"
 #include "dashboard/dashboard_data.h"
@@ -150,7 +151,9 @@ void Service::Publish() {
     published_revision_ = revision; published_minute_ = minute;
 }
 void Service::Run() {
-    int64_t deadline_ms = 0, next_pulse_ms = 0;
+    int64_t deadline_ms = 0, next_pulse_ms = 0, next_tone_attempt_ms=0;
+    bool playing_tone=false;
+    auto& preferences=device::QuickControls::Instance();
     std::vector<uint32_t> active_ids;
     auto& audio = xiaozhi::AudioSession::GetInstance();
     while (true) {
@@ -160,7 +163,7 @@ void Service::Run() {
             std::string error;
             const bool done = action == Action::Stop || store_.Snooze(active_ids,time(nullptr),error);
             if (done) {
-                audio.SetReminderTone(false);
+                audio.SetReminderTone(false);playing_tone=false;
                 active_id_.store(0);
                 active_ids.clear();
                 { std::lock_guard<std::mutex> lock(alert_mutex_); alert_.active = false; alert_.audible = false; }
@@ -179,6 +182,7 @@ void Service::Run() {
         }
         const int64_t now_ms = esp_timer_get_time()/1000;
         if (!due.empty()) {
+            preferences.CancelBluetooth();
             for (const auto& item : due) {
                 if (std::find(active_ids.begin(),active_ids.end(),item.id) == active_ids.end()) active_ids.push_back(item.id);
                 ESP_LOGI(TAG,"due id=%lu kind=%s",static_cast<unsigned long>(item.id),item.kind.c_str());
@@ -186,7 +190,10 @@ void Service::Run() {
             active_id_.store(due.front().id);
             deadline_ms = now_ms + 180000;
             next_pulse_ms = now_ms;
-            const bool tone_started = audio.SetReminderTone(true);
+            const bool tone_requested=preferences.RingEnabled();
+            const bool tone_started=!tone_requested || audio.SetReminderTone(true);
+            playing_tone=tone_requested && tone_started;
+            next_tone_attempt_ms=now_ms+5000;
             {
                 std::lock_guard<std::mutex> lock(alert_mutex_);
                 ++alert_.token;
@@ -195,7 +202,8 @@ void Service::Run() {
                 alert_.title = due.front().title;
                 alert_.at = due.front().at;
                 alert_.count = active_ids.size();
-                alert_.message = tone_started ? "" : "铃声暂不可用，振动提醒中";
+                alert_.message = !tone_started ? "铃声暂不可用，请查看提醒" :
+                    !tone_requested && !preferences.VibrationEnabled() ? "静默提醒" : "";
                 alert_action_ = Action::None;
             }
             alert_dirty_ = true;
@@ -203,7 +211,7 @@ void Service::Run() {
         bool audible;
         { std::lock_guard<std::mutex> lock(alert_mutex_); audible = alert_.active && alert_.audible; }
         if (audible && now_ms >= deadline_ms) {
-            audio.SetReminderTone(false);
+            audio.SetReminderTone(false);playing_tone=false;
             {
                 std::lock_guard<std::mutex> lock(alert_mutex_);
                 alert_.audible = false;
@@ -212,8 +220,14 @@ void Service::Run() {
             audible = false;
             alert_dirty_ = true;
         }
+        const bool want_tone=audible && preferences.RingEnabled();
+        if(want_tone!=playing_tone && (!want_tone || now_ms>=next_tone_attempt_ms)) {
+            const bool applied=audio.SetReminderTone(want_tone);
+            playing_tone=want_tone && applied;
+            next_tone_attempt_ms=now_ms+5000;
+        }
         if (audible && now_ms >= next_pulse_ms) {
-            Board::GetInstance().PulseVibration();
+            if(preferences.VibrationEnabled()) Board::GetInstance().PulseVibration();
             next_pulse_ms = now_ms + 2000;
         }
         if (alert_dirty_) PublishAlert();

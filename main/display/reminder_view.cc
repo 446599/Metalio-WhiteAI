@@ -56,7 +56,7 @@ void RawDisplay::DrawReminderAlertLocked() {
     DrawTextCentered(48,384,384,40,line2,ui_font_body);
     char count[64];
     if (reminder_alert_.count > 1) std::snprintf(count,sizeof(count),"共 %u 项提醒 / 一起处理",static_cast<unsigned>(reminder_alert_.count));
-    else std::snprintf(count,sizeof(count),"默认铃声 / 轻铃");
+    else std::snprintf(count,sizeof(count),"提醒方式 / 按控制栏设置");
     DrawTextCentered(32,448,416,32,count,ui_font_small);
     char message[96];
     FitText(reminder_alert_.message.empty() ? "请触摸下方按钮处理提醒" : reminder_alert_.message.c_str(),

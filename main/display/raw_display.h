@@ -93,6 +93,13 @@ private:
     };
 
     enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch };
+    bool HandleReaderTap(int x,int y);
+    bool HandleReaderKey(HardwareKey key);
+    void DrawProductQuickControlsLocked();
+    void SetQuickControls(bool open);
+    bool HandleQuickPull(int x0,int y0,int x1,int y1,int held_ms);
+    bool HandleQuickTap(int x,int y);
+    bool HandleQuickKey(HardwareKey key);
     void DrawProductWifiLocked(bool credentials);
     void DrawProductTextEntryLocked();
     void DrawProductNoteComposeLocked();
@@ -101,6 +108,7 @@ private:
     bool HandleSetupKey(HardwareKey key);
     void OpenEditorLocked(EditTarget target);
     void OpenNoteEditorLocked(bool existing);
+    void OpenConversationNote();
     void FinishEditorLocked(bool accept);
     void LeaveFormLocked(ProductPage destination);
     void ClearFormLocked();
@@ -130,6 +138,7 @@ private:
     void DrawProductReaderLocked();
     void DrawProductTodayListLocked();
     void DrawProductCardBoxLocked();
+    bool SelectCardSnapshotLocked(int selected);
     void DrawProductCardDetailLocked();
     void DrawProductKeepLocked();
     void DrawProductWorkbenchLocked();
@@ -193,6 +202,12 @@ private:
     void DrawDigit(int x, int y, int scale, int digit);
     void DrawPercent(int x, int y, int scale, int value);
 
+    std::atomic_bool quick_controls_open_{false};
+    bool quick_bluetooth_=false;
+    int quick_ble_page_=0;
+    uint32_t last_quick_revision_=0,last_reader_revision_=0;
+    int book_list_page_=0;
+    std::string selected_card_title_,selected_card_text_;
     esp_lcd_panel_handle_t panel_ = nullptr;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_touch_handle_t touch_ = nullptr;
@@ -268,7 +283,7 @@ private:
     uint32_t ai_drawn_turn_ = 0;
     uint32_t last_conversation_revision_ = 0;
     uint8_t quick_note_state_ = 0;
-    uint8_t reader_page_ = 0;
+
     int calendar_month_ = 0;
     int calendar_day_ = 0;
     int calendar_events_page_ = 0;

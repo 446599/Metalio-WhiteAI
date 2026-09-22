@@ -15,10 +15,16 @@ inline std::vector<Key> LetterKeys(Mode mode,bool symbols_second=false) {
         const std::string letters=rows[row];const int left=32+(10-static_cast<int>(letters.size()))*21;
         for(size_t col=0;col<letters.size();++col) {
             const char value=letters[col];const char label=mode==Mode::Upper && value>='a' && value<='z' ? char(value-'a'+'A') : value;
-            keys.push_back({left+static_cast<int>(col)*42,400+row*64,38,56,std::string(1,label),value});
+            const bool third = row==2 && mode!=Mode::Symbols;
+            keys.push_back({third ? 90+static_cast<int>(col)*40 : left+static_cast<int>(col)*42,
+                400+row*64,third ? 36 : 38,56,std::string(1,label),value});
         }
     }
     return keys;
 }
+inline Key BackspaceKey(Mode mode) {
+    return mode==Mode::Symbols ? Key{344,592,104,56,"",0} : Key{384,528,64,56,"",0};
+}
+inline Key ShiftKey() {return {32,528,48,56,"↑",0};}
 inline bool Inside(int x,int y,int l,int t,int w,int h) {return x>=l && x<l+w && y>=t && y<t+h;}
 }
