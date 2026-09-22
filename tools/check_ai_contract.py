@@ -24,7 +24,7 @@ def main():
     methods = ['BeginTextTask', 'CaptureHistory', 'SubmitText', 'SwitchChat', 'DeleteChat', 'ListenStart', 'ListenStop', 'Abort', 'RunQuickAction', 'SaveCapsule', 'RestoreCapsule',
                'IsListening', 'IsSessionReady', 'EndListenWindowLocked',
                'InvalidateTransportLocked', 'HandleDisconnect', 'SavePendingCapsule',
-               'ConnectOnce', 'ReleaseTransport', 'SendPendingAction', 'HandleData']
+               'SendAudio', 'CheckTurnProgress', 'ConnectOnce', 'ReleaseTransport', 'SendPendingAction', 'HandleData']
     # Extract non-void/bool methods with the same balanced parser used by previews.
     parse_source = re.sub(r'^bool Client::', 'int Client::', source, flags=re.M)
     bodies = []
@@ -57,6 +57,9 @@ void xTaskNotifyGive(TaskHandle_t) {}
 #define ESP_LOGW(...) ((void)0)
 class WebSocket {
 public:
+    bool binary_ok=true;
+    bool IsConnected(){return true;}
+    bool Send(const void*,size_t,bool){return binary_ok;}
     std::function<void()> on_connected, on_disconnected;
     std::function<void(int)> on_error;
     std::function<void(const char*,size_t,bool)> on_data;
@@ -323,6 +326,56 @@ int main() {
     assert(!ChatTask::Instance().Read(read1.id,4999).ok);
     auto stats=ChatTask::Instance().Stats();assert(stats.reads==2&&stats.failures==1&&stats.read==read1.next&&!ChatTask::Instance().ReadAll());
     ChatTask::Instance().Cancel();
+    // A silent server must not leave Transcribing forever; no automatic replay.
+    connected();fake_us=1000000000;
+    assert(client.ListenStart());client.SendPendingAction();assert(audio.capture);
+    assert(client.ListenStop());client.SendPendingAction();
+    const auto sent_before_timeout=sent.size();
+    client.CheckTurnProgress(fake_us/1000+19999);
+    assert(conversation.Snapshot().state==TurnState::Transcribing);
+    client.CheckTurnProgress(fake_us/1000+20000);
+    assert(conversation.Snapshot().state==TurnState::Error && !client.turn_in_flight_);
+    assert(!client.connected_.load() && sent.size()==sent_before_timeout && !audio.capture);
+    connected();assert(client.ListenStart());client.SendPendingAction();
+    // Early STT still sends manual stop; it must not overwrite Thinking.
+    event(R"({"type":"stt","text":"early transcript"})");
+    assert(!audio.capture && client.pending_action_.load()==kActionListenStop);
+    client.SendPendingAction();assert(sent.back().find("stop")!=std::string::npos);
+    assert(conversation.Snapshot().state==TurnState::Thinking);
+    // Repeated emotion-only notifications do not count as answer progress.
+    const auto waiting=client.response_started_ms_.load();
+    fake_us+=30000000;event(R"({"type":"llm","emotion":"happy"})");
+    assert(client.response_started_ms_.load()==waiting);
+    client.CheckTurnProgress(waiting+45000);assert(conversation.Snapshot().state==TurnState::Error);
+    assert(conversation.Snapshot().transcript=="early transcript");
+    // All invalidation paths settle UI, including queue overflow/local release.
+    connected();assert(client.ListenStart());client.SendPendingAction();client.ListenStop();client.SendPendingAction();
+    const auto stale_epoch=client.transport_epoch_;
+    client.InvalidateTransportLocked("test_reset");
+    assert(conversation.Snapshot().state==TurnState::Error);
+    const auto late=std::string(R"({"type":"stt","text":"late"})");
+    client.HandleData(stale_epoch,late.data(),late.size(),false);assert(conversation.Snapshot().transcript.empty());
+    // Even corrupted timer/flag combinations cannot leave an orphan spinner.
+    conversation.SetState(TurnState::Transcribing);client.response_started_ms_=0;
+    client.CheckTurnProgress(fake_us/1000);assert(conversation.Snapshot().state==TurnState::Error);
+    connected();assert(client.ListenStart());client.SendPendingAction();
+    const char packet[]={1,2,3};assert(client.SendAudio(packet,sizeof(packet)));
+    assert(client.uplink_packets_==1 && client.uplink_bytes_==3 && !client.uplink_failed_);
+    client.websocket_->binary_ok=false;assert(!client.SendAudio(packet,sizeof(packet)) && client.uplink_failed_);
+    client.CheckTurnProgress(fake_us/1000);assert(!audio.capture && conversation.Snapshot().state==TurnState::Error);
+    connected();assert(client.ListenStart());client.SendPendingAction();client.ListenStop();
+    assert(!client.SendAudio(packet,sizeof(packet)) && !client.uplink_failed_); // normal key-up is not a send error
+    client.SendPendingAction();client.Abort();
+    // A connected socket without the application hello is not ready indefinitely.
+    client.ReleaseTransport();assert(client.ConnectOnce());
+    client.CheckTurnProgress(client.hello_started_ms_+10000);assert(!client.connected_);
+    // Keepalives cannot extend a whole turn forever.
+    connected();assert(client.ListenStart());client.SendPendingAction();client.ListenStop();client.SendPendingAction();
+    event(R"({"type":"stt","text":"preserve me"})");
+    client.response_started_ms_=client.turn_started_ms_+179999;
+    client.CheckTurnProgress(client.turn_started_ms_+180000);
+    assert(conversation.Snapshot().state==TurnState::Error && conversation.Snapshot().transcript=="preserve me");
+    std::puts("Turn recovery: silent/early-STT/meaningful-progress/orphan/reset/send-failure/hello/hard-limit passed");
     // Full bounded strings never end inside a multibyte codepoint.
     conversation.Begin();
     std::string long_text;

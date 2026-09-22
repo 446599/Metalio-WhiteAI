@@ -175,6 +175,8 @@ bool Client::ListenStart() {
     ++intent_generation_;
     action_label_.clear(); resume_context_.clear();chat::History::Instance().CancelResume();task_expected_=false;ChatTask::Instance().Cancel();
     conversation.Begin();
+    turn_started_ms_=esp_timer_get_time()/1000;
+    uplink_packets_.store(0);uplink_bytes_.store(0);uplink_failed_.store(false);
     capture_started_.store(false);
     followup_turn_.store(false);
     pending_prompt_.clear();
@@ -225,6 +227,8 @@ bool Client::BeginTextTask(const std::string& label,const std::string& user,cons
     const auto now=esp_timer_get_time()/1000;
     if(last_text_action_ms_ && now-last_text_action_ms_<10000){conversation.SetState(TurnState::Error,"操作过于频繁，请稍后再试");return false;}
     if(!ChatTask::Instance().Begin(label,request))return false;
+    turn_started_ms_=now;
+    uplink_packets_.store(0);uplink_bytes_.store(0);uplink_failed_.store(false);
     last_text_action_ms_=now;task_deadline_ms_.store(now+45000);++intent_generation_;action_label_=label;task_expected_=true;
     if(label!="继续对话"){resume_context_.clear();chat::History::Instance().CancelResume();}
     pending_prompt_=label+"，请调用self.chat.get_task"; // Short explicit tool request; no original text on detect.
@@ -360,6 +364,7 @@ bool Client::ConnectOnce() {
     {
         std::lock_guard<std::mutex> lock(intent_mutex_);
         epoch = ++transport_epoch_;
+        hello_started_ms_=esp_timer_get_time()/1000;
     }
     candidate->OnConnected([this, epoch]() {
         std::lock_guard<std::mutex> lock(intent_mutex_);
@@ -368,15 +373,15 @@ bool Client::ConnectOnce() {
         last_ping_ms_.store(esp_timer_get_time() / 1000);
         PublishStatus("小智在线");
     });
-    candidate->OnDisconnected([this, epoch]() { HandleDisconnect(epoch); });
-    candidate->OnError([this, epoch](int /*error*/) { HandleDisconnect(epoch); });
+    candidate->OnDisconnected([this, epoch]() { HandleDisconnect(epoch,"peer_or_tcp"); });
+    candidate->OnError([this, epoch](int error) { HandleDisconnect(epoch,"transport_error",error); });
     candidate->OnData([this, epoch](const char* data, size_t length, bool binary) {
         HandleData(epoch, data, length, binary);
     });
 
     PublishStatus("小智连接中");
     if (!candidate->Connect(url_.c_str())) {
-        HandleDisconnect(epoch);
+        HandleDisconnect(epoch,"connect_failed");
         return false;
     }
     {
@@ -392,7 +397,7 @@ bool Client::ConnectOnce() {
     }
     const int input_rate = GetHAL().AudioInputSampleRate();
     if (!SendText(BuildHello(input_rate > 0 ? input_rate : 16000, audio_version_))) {
-        HandleDisconnect(epoch);
+        HandleDisconnect(epoch,"hello_send");
         ReleaseTransport();
         PublishStatus("小智重连中");
         return false;
@@ -412,7 +417,10 @@ bool Client::SendAudio(const void* data, size_t length) {
     std::lock_guard<std::mutex> lock(ws_mutex_);
     if (!listen_requested_.load() || !AudioSession::GetInstance().capturing() ||
         !connected_.load() || websocket_ == nullptr || !websocket_->IsConnected()) return false;
-    return websocket_->Send(data, length, true);
+    const bool sent=websocket_->Send(data, length, true);
+    if(sent){uplink_packets_.fetch_add(1);uplink_bytes_.fetch_add(static_cast<uint32_t>(length));}
+    else uplink_failed_.store(true); // worker owns reset; never close from capture task
+    return sent;
 }
 
 void Client::ReleaseTransport() {
@@ -436,7 +444,21 @@ void Client::EndListenWindowLocked() {
     AudioSession::GetInstance().StopCapture();
 }
 
-void Client::InvalidateTransportLocked() {
+void Client::InvalidateTransportLocked(const char* cause) {
+    // Every invalidation must settle an unfinished conversation BEFORE clearing
+    // its flags/timers. Otherwise the UI can be Transcribing with no live turn.
+    const auto state=Conversation::GetInstance().Snapshot();
+    const bool unfinished=state.state==TurnState::Connecting || state.state==TurnState::Listening ||
+        state.state==TurnState::Transcribing || state.state==TurnState::Thinking || state.state==TurnState::Speaking;
+    if(unfinished) {
+        Conversation::GetInstance().SetState(TurnState::Error,"连接中断，请重试");
+        CaptureHistory("error");
+    }
+    if(connected_.load() || turn_in_flight_ || pending_action_.load() || unfinished)
+        XZ_META("reset cause=%s epoch=%lu state=%u active=%d tx_packets=%lu tx_bytes=%lu",cause,
+            (unsigned long)transport_epoch_,(unsigned)state.state,turn_in_flight_,
+            (unsigned long)uplink_packets_.load(),(unsigned long)uplink_bytes_.load());
+    turn_started_ms_=hello_started_ms_=0;uplink_failed_.store(false);
     ++transport_epoch_;
     mcp_requests_.clear();
     connected_.store(false);
@@ -456,19 +478,18 @@ void Client::InvalidateTransportLocked() {
     AudioSession::GetInstance().Reset();
 }
 
-void Client::HandleDisconnect(uint32_t epoch) {
+void Client::HandleDisconnect(uint32_t epoch, const char* cause, int error) {
     std::lock_guard<std::mutex> lock(intent_mutex_);
     if (epoch != transport_epoch_) return;
     const bool interrupted=turn_in_flight_ || pending_action_.load()!=0 || listen_requested_.load();
     const auto task=ChatTask::Instance().Stats();
-    XZ_META("disconnect epoch=%lu active=%d task=%lu read=%u total=%u",(unsigned long)epoch,
+    XZ_META("disconnect cause=%s error=%d epoch=%lu active=%d task=%lu read=%u total=%u",cause,error,(unsigned long)epoch,
         interrupted,(unsigned long)task.id,(unsigned)task.read,(unsigned)task.bytes);
-    if(interrupted) CaptureHistory("error");
-    InvalidateTransportLocked();
+    InvalidateTransportLocked(cause);
     // Idle socket expiry must not replace a completed answer with an error or
     // disable its archive/translate controls. Never replay microphone input.
     if(interrupted) Conversation::GetInstance().SetState(TurnState::Error,
-        "连接中断，原文与已收内容保留；联网后重试");
+        "连接中断，请重试");
     PublishStatus("小智重连中");
 }
 
@@ -533,8 +554,8 @@ void Client::SendPendingAction() {
         generation = intent_generation_;
         epoch = transport_epoch_;
         if (!connected_.load() || !IsSessionReady()) {
-            EndListenWindowLocked();
-            conversation.SetState(TurnState::Error, "AI 离线，请重试");
+            InvalidateTransportLocked("action_not_ready");
+            conversation.SetState(TurnState::Error, "小智离线，请重试");
             return;
         }
         std::string session;
@@ -567,14 +588,15 @@ void Client::SendPendingAction() {
             message = prefix + "\"type\":\"listen\",\"state\":\"stop\"}";
             accept_response_.store(true);
             response_started_ms_.store(esp_timer_get_time() / 1000);
-            conversation.SetState(TurnState::Transcribing, "已松开，正在识别");
+            if(conversation.Snapshot().transcript.empty())
+                conversation.SetState(TurnState::Transcribing, "正在识别");
         } else {
             InvalidateTransportLocked();
             return;
         }
     }
     if (!SendText(message)) {
-        HandleDisconnect(epoch);
+        HandleDisconnect(epoch,"action_send");
         return;
     }
     if (action == kActionListenStart) {
@@ -584,6 +606,7 @@ void Client::SendPendingAction() {
         if (epoch != transport_epoch_ || generation != intent_generation_ || !listen_requested_.load()) return;
         if (audio.StartCapture()) {
             capture_started_.store(true);
+            accept_response_.store(true); // some services return STT before physical key-up
             conversation.SetState(TurnState::Listening, "松开 AI 键结束说话");
             PublishStatus("小智聆听中");
         } else {
@@ -597,7 +620,7 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
     std::lock_guard<std::mutex> lock(intent_mutex_);
     if (epoch != transport_epoch_ || !connected_.load()) return;
     if (binary) {
-        if (!accept_response_.load() || !playback_receiving_) return;
+        if (!turn_in_flight_ || !accept_response_.load() || !playback_receiving_) return;
         if (response_started_ms_.load() > 0) response_started_ms_.store(esp_timer_get_time() / 1000);
         // Opus packets are handled by the audio session; the JSON parser never
         // sees compressed frames.
@@ -638,6 +661,7 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
                 (!session_id_.empty() && session_id_ != session)) { cJSON_Delete(root); return; }
             session_id_ = session;
         }
+        hello_started_ms_=0;
         // The server may answer with its own audio parameters; the Opus path
         // re-opens its handles on the next window when they differ.
         const cJSON* params = cJSON_GetObjectItemCaseSensitive(root, "audio_params");
@@ -660,6 +684,7 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
         const char* text = StringItem(root, "text");
         if (text != nullptr && text[0] != '\0') {
             Conversation::GetInstance().SetTranscript(text);
+            response_started_ms_.store(esp_timer_get_time()/1000);
             CaptureHistory("pending");
             SaveCapsule();
             char summary[80];
@@ -669,16 +694,18 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
             // Stopping here keeps the next turn a deliberate tap instead of a
             // permanently open mic, and it never streams TTS back into the
             // server.  An empty stt is a VAD tick, not a transcript.
+            const bool needs_stop=capture_started_.load() && listen_requested_.load();
             EndListenWindowLocked();
+            if(needs_stop){pending_action_.store(kActionListenStop);if(task_handle_)xTaskNotifyGive(task_handle_);}
         }
     } else if (std::strcmp(type, "llm") == 0) {
         if (!accept_response_.load()) { cJSON_Delete(root); return; }
-        response_started_ms_.store(esp_timer_get_time() / 1000);
         if(task_expected_&&!ChatTask::Instance().ReadAll()){cJSON_Delete(root);return;}
         const char* text = StringItem(root, "text");
         const char* emotion = StringItem(root, "emotion");
         PublishStatus("小智思考中");
         if (text != nullptr && text[0] != '\0') {
+            response_started_ms_.store(esp_timer_get_time()/1000);
             Conversation::GetInstance().ReceiveAnswer(text, false);
             Conversation::GetInstance().SetState(TurnState::Thinking);
             dashboard::DashboardData::GetInstance().SetAiSummary(1, text);
@@ -689,11 +716,11 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
         }
     } else if (std::strcmp(type, "tts") == 0) {
         if (!accept_response_.load()) { cJSON_Delete(root); return; }
-        response_started_ms_.store(esp_timer_get_time() / 1000);
         const char* state = StringItem(root, "state");
         const bool unread=task_expected_&&!ChatTask::Instance().ReadAll();
         if(unread && (!state || std::strcmp(state,"stop"))) {cJSON_Delete(root);return;}
         if (state != nullptr && std::strcmp(state, "start") == 0) {
+            if(!playback_receiving_)response_started_ms_.store(esp_timer_get_time()/1000);
             EndListenWindowLocked();
             playback_receiving_ = true;
             AudioSession::GetInstance().OpenPlayback();
@@ -708,13 +735,14 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
                 Conversation::GetInstance().SetState(TurnState::Speaking);
             }
             const char* text = StringItem(root, "text");
+            if(text && *text)response_started_ms_.store(esp_timer_get_time()/1000);
             Conversation::GetInstance().ReceiveAnswer(text, true);
             if (text) dashboard::DashboardData::GetInstance().SetAiSummary(1, text);
         } else if (state != nullptr && std::strcmp(state, "stop") == 0) {
             AudioSession::GetInstance().EndPlayback();
             playback_receiving_ = false;
             accept_response_.store(false);
-            turn_in_flight_ = false;
+            turn_in_flight_ = false;turn_started_ms_=0;
             response_started_ms_.store(0);
             if(unread){Conversation::GetInstance().SetState(TurnState::Error,"小智未读取设备任务；请检查 MCP 发现和角色设置后重试");CaptureHistory("error");}
             else {Conversation::GetInstance().SetState(TurnState::Done);CaptureHistory("complete");SaveCapsule();}
@@ -742,7 +770,7 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
                 } else {
                     // Do not acknowledge dropped work as successful. Reset
                     // the transport so the server can rediscover/retry.
-                    InvalidateTransportLocked();
+                    InvalidateTransportLocked("mcp_queue_full");
                 }
                 cJSON_free(json);
             }
@@ -786,7 +814,34 @@ void Client::SendPendingMcp() {
                          "\",\"type\":\"mcp\",\"payload\":" + reply + "}";
     const bool sent=SendText(message);
     XZ_META("mcp_tx epoch=%lu bytes=%u sent=%d",(unsigned long)request.epoch,(unsigned)message.size(),sent);
-    if (!sent) HandleDisconnect(request.epoch);
+    if (!sent) HandleDisconnect(request.epoch,"mcp_send");
+}
+
+void Client::CheckTurnProgress(int64_t now_ms) {
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    auto& conversation=Conversation::GetInstance();
+    const auto state=conversation.State();
+    const bool busy=state==TurnState::Connecting || state==TurnState::Listening ||
+        state==TurnState::Transcribing || state==TurnState::Thinking || state==TurnState::Speaking;
+    const char* reason=nullptr;const char* message="等待超时，请重试";
+    if(connected_.load() && hello_started_ms_ && now_ms-hello_started_ms_>=10000 && !IsSessionReady()) {
+        reason="hello_timeout";message="小智未就绪，请重试";
+    } else if(uplink_failed_.load() && turn_in_flight_) {
+        reason="audio_send";message="发送失败，请重试";
+    } else if(busy && !turn_in_flight_ && !pending_action_.load() && !listen_requested_.load()) {
+        reason="orphan_turn";message="会话已中断，请重试";
+    } else if(task_deadline_ms_.load()>0 && now_ms>=task_deadline_ms_.load() && !ChatTask::Instance().ReadAll()) {
+        reason="task_unread";message="小智未读取任务，请检查 MCP";
+    } else if(turn_in_flight_ && turn_started_ms_ && now_ms-turn_started_ms_>=180000) {
+        reason="turn_limit";
+    } else if(turn_in_flight_ && response_started_ms_.load()>0) {
+        const int64_t limit=state==TurnState::Transcribing ? 20000 : 45000;
+        if(now_ms-response_started_ms_.load()>=limit){reason="response_timeout";if(conversation.Snapshot().transcript.empty())message="未收到识别结果，请重试";}
+    }
+    if(!reason)return;
+    InvalidateTransportLocked(reason);
+    if(busy)conversation.SetState(TurnState::Error,message);
+    PublishStatus("小智重连中");
 }
 
 void Client::Run() {
@@ -819,14 +874,7 @@ void Client::Run() {
         if (listen_requested_.load() && tick_ms - listen_started_ms_.load() >= 60000) {
             (void)ListenStop();
         }
-        if(task_deadline_ms_.load()>0 && tick_ms>=task_deadline_ms_.load() && !ChatTask::Instance().ReadAll()) {
-            (void)Abort();
-            Conversation::GetInstance().SetState(TurnState::Error,"设备任务未读完，请检查 MCP；原文保留");
-        }
-        if (response_started_ms_.load() > 0 && tick_ms - response_started_ms_.load() >= 45000) {
-            (void)Abort();
-            Conversation::GetInstance().SetState(TurnState::Error, "等待 AI 超时，原文仍保留，可重试");
-        }
+        CheckTurnProgress(tick_ms);
         if (!enabled_) {
             activity.Release();vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
@@ -867,7 +915,7 @@ void Client::Run() {
                     last_ping_ms_.store(now_ms);
                 }
             }
-            if (disconnected) HandleDisconnect(epoch);
+            if (disconnected) HandleDisconnect(epoch,"health_check");
         }
         activity.Release();
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));

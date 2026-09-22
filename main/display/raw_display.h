@@ -96,9 +96,17 @@ private:
         NoteCompose,
         ChatList,
         ChatDetail,
+        Weather,
     };
 
-    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch, ChatMessage };
+    enum class EditTarget { None, WifiSsid, WifiPassword, NoteTitle, NoteProject, NoteBody, NoteSearch, ChatMessage, WeatherCity };
+    void DrawProductWeatherLocked();
+    bool HandleWeatherTap(int x, int y);
+    bool HandleWeatherKey(HardwareKey key);
+    std::string weather_query_;
+    bool weather_search_=false;
+    uint32_t last_weather_revision_=0;
+    bool navigation_focus_=false;
     void DrawProductHistoryLocked(bool detail);
     bool HandleHistoryTap(int x,int y);
     bool HandleHistoryKey(HardwareKey key);

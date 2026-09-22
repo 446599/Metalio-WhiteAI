@@ -32,6 +32,7 @@ public:
     static constexpr size_t kAnswerBytes = 6144;
     static Conversation& GetInstance();
     ConversationSnapshot Snapshot() const;
+    TurnState State() const;
     // Frozen at Begin(): an archive command must not archive its own speech.
     ConversationSnapshot PreviousCompleted() const;
     uint32_t Revision() const;

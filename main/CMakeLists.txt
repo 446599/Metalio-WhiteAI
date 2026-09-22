@@ -34,6 +34,8 @@ set(SOURCES
             "reminders/reminder_service.cc"
             "dashboard/dashboard_data.cc"
             "dashboard/dashboard_service.cc"
+    "dashboard/weather_provider.cc"
+    "display/weather_view.cc"
             "xiaozhi/xiaozhi_client.cc"
             "chat/history_store.cc"
             "chat/history_service.cc"

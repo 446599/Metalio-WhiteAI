@@ -22,6 +22,8 @@ void Conversation::ContentChanged() {
     data_.save_failed = false;
     if (data_.persisted_revision != 0) data_.message = "内容已更新，待保存";
 }
+TurnState Conversation::State() const {std::lock_guard<std::mutex> lock(mutex_);return data_.state;}
+
 ConversationSnapshot Conversation::Snapshot() const { std::lock_guard<std::mutex> lock(mutex_); return data_; }
 ConversationSnapshot Conversation::PreviousCompleted() const {
     std::lock_guard<std::mutex> lock(mutex_);return previous_completed_;

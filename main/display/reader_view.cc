@@ -68,5 +68,5 @@ void RawDisplay::DrawProductReaderLocked(){
     DrawTextCentered(32,632,416,32,book.busy?"正在读取…":page,ui_font_small);
     StrokeRoundRect(32,672,200,48,12,1);DrawTextCentered(32,672,200,48,book.opened?"上一页":"刷新书库",ui_font_small);
     StrokeRoundRect(248,672,200,48,12,1);DrawTextCentered(248,672,200,48,"下一页",ui_font_small);
-    DrawProductControlRailLocked(book.message.empty()?"单本上限 256 KiB / HOME 返回":book.message.c_str());
+    DrawProductControlRailLocked(book.message.c_str());
 }

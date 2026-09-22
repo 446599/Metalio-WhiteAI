@@ -148,6 +148,13 @@ def main() -> int:
     assert len(test_y) == 6 and all(_inside((test_x, y, test_w, test_h), width, height) for y in test_y)
     assert all(b - a >= test_h for a, b in zip(test_y, test_y[1:]))
 
+    from render_ui_preview import function
+    home_render = function(source, 'RawDisplay::DrawProductHomeLocked')
+    row_render = function(source, 'RawDisplay::DrawProductIconRowLocked')
+    assert 'StrokeRoundRect' not in home_render, 'Home navigation must remain borderless'
+    assert 'FillRoundRect' not in row_render, 'Menu selection must not draw a box'
+    assert 'navigation_focus_' in home_render and 'navigation_focus_' in row_render
+    assert 'ProductPage::Weather' in source and 'HandleWeatherTap(x,y)' in source
     print("UI contract OK")
     print(f"logical={width}x{height} home_hit={home}")
     print(f"home_tiles={tiles} home_navigation={nav} passive_rail_y={rail_y}")
