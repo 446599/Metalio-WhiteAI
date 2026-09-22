@@ -1,0 +1,46 @@
+name: Chat history validation
+on:
+  push:
+    branches: [codex/chat-history]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: v1.7.19
+          path: managed_components/espressif__cjson/cJSON
+          persist-credentials: false
+      - name: Existing regression baseline
+        run: |
+          python3 tools/check_ai_contract.py
+          python3 tools/check_mono_controls.py
+          python3 tools/check_memory_contract.py
+          python3 tools/check_audio_playback.py
+      - name: Source inspection snapshot
+        if: always()
+        shell: python
+        run: |
+          import pathlib, subprocess, zipfile
+          paths=subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
+          with zipfile.ZipFile('chat-sources.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for name in paths:
+              p=pathlib.Path(name)
+              if name and p.is_file() and p.suffix.lower() not in ('.ttf','.otf','.fontpack','.bin'):
+                z.write(p,name)
+            for p in pathlib.Path('managed_components/espressif__cjson/cJSON').glob('cJSON.[ch]'):
+              z.write(p,str(p))
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-sources
+          path: chat-sources.zip
+          retention-days: 1
