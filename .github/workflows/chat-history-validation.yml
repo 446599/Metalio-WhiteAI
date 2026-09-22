@@ -5,42 +5,119 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+concurrency:
+  group: chat-history-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  baseline:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - run: python3 -m pip install Pillow CairoSVG==2.8.2
+      - name: Apply checksum-verified implementation and rasterize upstream icons
+        run: python3 .ci/apply-chat.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chat-overlay
+          path: chat-overlay.zip
+          retention-days: 3
+  host:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: chat-overlay
+      - run: unzip -o chat-overlay.zip
       - uses: actions/checkout@v4
         with:
           repository: DaveGamble/cJSON
           ref: v1.7.19
           path: managed_components/espressif__cjson/cJSON
           persist-credentials: false
-      - name: Existing regression baseline
+      - run: python3 -m pip install Pillow
+      - name: Chat actions, persistence and all product regressions
         run: |
-          python3 tools/check_ai_contract.py
-          python3 tools/check_mono_controls.py
-          python3 tools/check_memory_contract.py
-          python3 tools/check_audio_playback.py
-      - name: Source inspection snapshot
+          mkdir -p validation
+          failed=0
+          for t in tools/check_chat_history.py tools/check_ui_icon_sources.py tools/check_audio_playback.py tools/check_mono_controls.py tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
+            python3 "$t" > "validation/$(basename "$t").log" 2>&1 || failed=1
+            tail -n 12 "validation/$(basename "$t").log"
+          done
+          exit "$failed"
+      - name: Real font framebuffer and input routing
         if: always()
-        shell: python
         run: |
-          import pathlib, subprocess, zipfile
-          paths=subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
-          with zipfile.ZipFile('chat-sources.zip','w',zipfile.ZIP_DEFLATED) as z:
-            for name in paths:
-              p=pathlib.Path(name)
-              if name and p.is_file() and p.suffix.lower() not in ('.ttf','.otf','.fontpack','.bin'):
-                z.write(p,name)
-            for p in pathlib.Path('managed_components/espressif__cjson/cJSON').glob('cJSON.[ch]'):
-              z.write(p,str(p))
+          mkdir -p validation
+          python3 tools/render_ui_preview.py --out build/chat-preview > validation/render.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: chat-sources
-          path: chat-sources.zip
-          retention-days: 1
+          name: chat-host-validation
+          path: |
+            validation/
+            build/chat-preview/**/*.png
+          retention-days: 7
+  firmware:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: chat-overlay
+      - name: Restore tested source overlay
+        run: python3 -m zipfile -e chat-overlay.zip .
+      - name: Full ESP32-S3 build, delivery and audio memory budget
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          idf.py build 2>&1 | tee firmware-build.log
+          exit "${PIPESTATUS[0]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-build-validation
+          path: |
+            firmware-build.log
+            build/delivery_manifest.json
+            build/audio_memory.json
+          retention-days: 7
+  publish:
+    needs: [host, firmware]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/chat-history
+          fetch-depth: 2
+      - name: Check branch has not moved
+        run: test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: chat-overlay
+      - name: Commit validated product source on isolated branch
+        run: |
+          unzip -o chat-overlay.zip
+          git add main tools docs assets
+          git diff --cached --check
+          git config user.name 'WhiteAI validation'
+          git config user.email '116695909+446599@users.noreply.github.com'
+          git commit -m 'feat(chat): persistent history, MCP quick tasks and consistent notes UI [skip ci]' -m 'Host checks, actual font previews and ESP-IDF 6.0.1 build with audio RAM guard passed. Live cloud MCP selection, physical SD and device behavior still require board validation.'
+          git push origin HEAD:codex/chat-history
