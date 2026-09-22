@@ -10,15 +10,30 @@ env:
 jobs:
   sources:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export tracked repository for local validation
-        run: git archive --format=zip --output=turn-weather-source.zip HEAD
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: turn-weather-source
-          path: turn-weather-source.zip
+          repository: DaveGamble/cJSON
+          ref: v1.7.19
+          path: managed_components/espressif__cjson/cJSON
+          persist-credentials: false
+      - name: Baseline regression checks
+        run: |
+          python3 tools/check_ai_contract.py
+          python3 tools/check_chat_history.py
+          python3 tools/check_dashboard_contract.py
+          python3 tools/check_ui_contract.py
+          python3 tools/check_sleep_contract.py
+      - name: Export host dependency
+        if: always()
+        run: zip -j cjson-host.zip managed_components/espressif__cjson/cJSON/cJSON.c managed_components/espressif__cjson/cJSON/cJSON.h
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cjson-host
+          path: cjson-host.zip
           retention-days: 1
