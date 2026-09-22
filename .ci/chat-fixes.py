@@ -36,3 +36,20 @@ replace('main/xiaozhi/xiaozhi_client.cc','''        std::string context;
             if(chat::History::Instance().TakeResumed(context))resume_context_=std::move(context);''')
 replace('tools/tests/chat_client_history_stub.h','inline bool History::CanCapture()const{return true;}','inline bool History::CanCapture()const{return true;}\ninline void History::CancelResume(){}')
 replace('tools/tests/chat_history_contract.cc','CHECK(history.Switch(0));history.Poll(107);','CHECK(history.Switch(1));history.Poll(106);history.CancelResume();CHECK(!history.TakeResumed(resumed));\n    CHECK(history.Switch(0));history.Poll(107);')
+replace('main/xiaozhi/xiaozhi_client.cc','''        } else if (state != nullptr && std::strcmp(state, "sentence_start") == 0) {
+            const char* text = StringItem(root, "text");''','''        } else if (state != nullptr && std::strcmp(state, "sentence_start") == 0) {
+            // Some servers send their sole TTS start before calling MCP. That
+            // unverified start was ignored; open on the first verified sentence.
+            if(task_expected_ && !playback_receiving_){
+                EndListenWindowLocked();playback_receiving_=true;
+                AudioSession::GetInstance().OpenPlayback();
+                Conversation::GetInstance().SetState(TurnState::Speaking);
+            }
+            const char* text = StringItem(root, "text");''')
+replace('tools/check_ai_contract.py','''        auto pending=ChatTask::Instance().Read(0,0);assert(pending.ok&&!pending.text.empty());
+        event(R"({"type":"tts","state":"start"})");
+        event(R"({"type":"tts","state":"sentence_start","text":"处理结果"})");''','''        if(action==QuickAction::Translate){event(R"({"type":"tts","state":"start"})");assert(!audio.playback);}
+        auto pending=ChatTask::Instance().Read(0,0);assert(pending.ok&&!pending.text.empty());
+        if(action!=QuickAction::Translate)event(R"({"type":"tts","state":"start"})");
+        event(R"({"type":"tts","state":"sentence_start","text":"处理结果"})");
+        assert(audio.playback);''')
