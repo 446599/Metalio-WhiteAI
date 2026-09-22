@@ -30,6 +30,7 @@ code=r'''
 #include <functional>
 #include <string>
 #include "ui_work_queue.h"
+#include "power/activity.h"
 #define ESP_LOGI(...) ((void)0)
 bool timer_context=false;
 class Application {
@@ -77,6 +78,17 @@ int main(){
     check(b.up.click,80);check(b.up.long_press,100);
     check(b.down.click,90);check(b.down.long_press,0);
     check(b.down.click,0);check(b.up.click,10);
+    // Lock after an event is enqueued: even stale queued volume work must
+    // not enable audio or touch NVS behind the sleep coordinator.
+    for (auto action : {b.up.click,b.down.click,b.up.long_press,b.down.long_press}) {
+        const int volume=b.codec.volume, notices=b.display.notifications;
+        timer_context=true;action();timer_context=false;
+        power::Gate::Instance().locked.store(true);
+        std::function<void()> work;
+        assert(Application::GetInstance().queue.Pop(work));work();
+        assert(b.codec.volume==volume && b.display.notifications==notices);
+        power::Gate::Instance().locked.store(false);
+    }
     std::puts("Volume callbacks OK: click/long-press defer NVS and display out of timer context; bounds hold");
 }
 '''

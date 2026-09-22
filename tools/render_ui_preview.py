@@ -372,7 +372,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix='miaoink-ui-') as temporary:
         host = Path(temporary) / 'preview.cc'
         executable = Path(temporary) / 'preview'
-        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()))
+        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()))
         cjson = ROOT / "managed_components/espressif__cjson/cJSON"
         subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson), "-o", str(Path(temporary)/"cjson.o")], check=True)
         subprocess.run([compiler, '-std=c++17', '-O1', '-DFONTPACK_HOST_TEST', '-x', 'c++', '-I', str(ROOT / 'main'),

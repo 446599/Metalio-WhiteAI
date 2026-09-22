@@ -192,7 +192,7 @@ def _print_reply(link: SerialLink, command: str, timeout: float) -> int:
         if line.startswith("@@"):
             print(line)
             got_reply = True
-            if line.startswith(("@@INPUT_ACK", "@@INPUT_ERROR", "@@STATE", "@@INPUT_HELP", "@@FONT_ACK", "@@CAPSULE_ACK", "@@MCP_REPLY", "@@REMINDER_STATE", "@@DIAG_")):
+            if line.startswith(("@@INPUT_ACK", "@@INPUT_ERROR", "@@STATE", "@@INPUT_HELP", "@@FONT_ACK", "@@SLEEP ", "@@XIAOZHI_NET ", "@@CAPSULE_ACK", "@@MCP_REPLY", "@@REMINDER_STATE", "@@DIAG_")):
                 break
     if not got_reply:
         print("(未收到协议回复；普通 UI 命令可能只触发动作，不回 ACK)", file=sys.stderr)

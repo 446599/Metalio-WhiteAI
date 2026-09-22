@@ -23,6 +23,7 @@ public:
 
     void Start();
     void RefreshNow();
+    bool SleepReady()const {return !started_.load() || sleep_ready_.load();}
 
 private:
     DashboardService() = default;
@@ -38,7 +39,7 @@ private:
     bool FetchQuota();
     void PublishNetwork(const char* text);
 
-    std::atomic<bool> started_{false};
+    std::atomic<bool> started_{false},sleep_ready_{false};
     std::atomic<bool> refresh_requested_{false};
     TaskHandle_t task_handle_ = nullptr;
     std::string weather_url_;

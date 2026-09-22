@@ -32,6 +32,8 @@ public:
     void AddAuth(const std::string &&ssid, const std::string &&password);
     void Start();
     void Stop();
+    bool SuspendForSleep();
+    bool ResumeFromSleep();
     bool IsStarted() const { return started_; }
     bool IsConnected();
     bool WaitForConnected(int timeout_ms = 10000);
@@ -65,7 +67,7 @@ private:
     esp_event_handler_instance_t instance_any_id_ = nullptr;
     esp_event_handler_instance_t instance_got_ip_ = nullptr;
     esp_netif_t* station_netif_ = nullptr;
-    std::atomic<bool> started_{false};
+    std::atomic<bool> started_{false},sleeping_{false};
     std::atomic<bool> manual_setup_{false}, manual_attempting_{false};
     mutable std::recursive_mutex state_mutex_;
     std::mutex operation_mutex_;

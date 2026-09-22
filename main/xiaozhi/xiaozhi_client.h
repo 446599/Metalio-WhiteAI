@@ -1,6 +1,8 @@
 #pragma once
 
 #include "conversation.h"
+#include "power/activity.h"
+#include "xiaozhi/metadata_log.h"
 #include "xiaozhi/chat_task.h"
 #include "chat/history_service.h"
 
@@ -34,6 +36,9 @@ public:
     // listen/abort envelopes need before they can be sent at all.
     bool IsSessionReady() const;
     bool Enabled() const { return enabled_; }
+    bool SleepReady()const {return !started_.load() || !enabled_ || sleep_ready_.load();}
+    bool BusyForSleep();
+    std::string ConnectionStatus();
     // True while a listen window is pending or actually capturing audio.
     bool IsListening() const;
 
@@ -77,7 +82,7 @@ private:
     void EndListenWindowLocked();
     void InvalidateTransportLocked();
 
-    std::atomic<bool> started_{false};
+    std::atomic<bool> started_{false},sleep_ready_{false};
     std::atomic<bool> connected_{false};
     std::atomic<uint8_t> pending_action_{0};
     // Protect intent/check/start against a release racing the network worker.
@@ -95,6 +100,7 @@ private:
     std::string action_label_, resume_context_;
     bool task_expected_=false;
     int64_t last_text_action_ms_=0;
+    std::atomic<int64_t> task_deadline_ms_{0};
 
     std::atomic<bool> accept_response_{false};
     std::atomic<bool> followup_turn_{false};

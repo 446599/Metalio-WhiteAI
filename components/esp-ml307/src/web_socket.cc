@@ -46,9 +46,9 @@ WebSocket::WebSocket(NetworkInterface* network, int connect_id) : network_(netwo
 }
 
 WebSocket::~WebSocket() {
-    if (connected_) {
-        tcp_->Disconnect();
-    }
+    // The receive task can still be exiting after connected_ becomes false.
+    // Join/destroy it BEFORE destroying callbacks, buffers or handshake events.
+    if (tcp_) {tcp_->Disconnect();tcp_.reset();}
     if (handshake_event_group_) {
         vEventGroupDelete(handshake_event_group_);
     }
@@ -153,11 +153,6 @@ bool WebSocket::Connect(const char* uri) {
     }
     request += "\r\n";
 
-    if (tcp_->Send(request) < 0) {
-        ESP_LOGE(TAG, "Failed to send WebSocket handshake request");
-        return false;
-    }
-
     // 清除事件位
     xEventGroupClearBits(handshake_event_group_, HANDSHAKE_SUCCESS_BIT | HANDSHAKE_FAILED_BIT);
     
@@ -176,6 +171,11 @@ bool WebSocket::Connect(const char* uri) {
         }
     });
 
+    if (tcp_->Send(request) != static_cast<int>(request.size())) {
+        ESP_LOGE(TAG, "Failed to send WebSocket handshake request");
+        return false;
+    }
+
     // 等待握手完成，超时时间10秒
     EventBits_t bits = xEventGroupWaitBits(
         handshake_event_group_,
@@ -185,8 +185,7 @@ bool WebSocket::Connect(const char* uri) {
         pdMS_TO_TICKS(10000)  // 10秒超时
     );
 
-    if (bits & HANDSHAKE_SUCCESS_BIT) {
-        connected_ = true;
+    if ((bits & HANDSHAKE_SUCCESS_BIT) && connected_) {
         if (on_connected_) {
             on_connected_();
         }
@@ -209,11 +208,13 @@ bool WebSocket::Send(const std::string& data) {
 }
 
 bool WebSocket::Send(const void* data, size_t len, bool binary, bool fin) {
-    if (len > 65535) {
+    if (len > 65535 || (len && !data)) {
         ESP_LOGE(TAG, "Data too large, maximum supported size is 65535 bytes");
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    if(!tcp_ || !connected_)return false;
     std::string frame;
     frame.reserve(len + 8);  // 最大可能的帧大小（2字节帧头 + 2字节长度 + 4字节mask）
 
@@ -249,16 +250,24 @@ bool WebSocket::Send(const void* data, size_t len, bool binary, bool fin) {
         frame.push_back(static_cast<char>(payload[i] ^ mask[i % 4]));
     }
 
-    // 更新continuation_状态
-    continuation_ = !fin;
-
-    // 发送帧
-    std::lock_guard<std::mutex> lock(send_mutex_);
-    return tcp_->Send(frame) >= 0;
+    const bool ok=tcp_->Send(frame)==static_cast<int>(frame.size());
+    if(ok)continuation_=!fin;
+    return ok;
 }
 
-void WebSocket::Ping() {
-    SendControlFrame(0x9, nullptr, 0);
+bool WebSocket::ServiceControl() {
+    std::string payload;
+    {std::lock_guard<std::mutex> lock(control_mutex_);
+        if(!pong_pending_)return true;
+        payload=std::move(pending_pong_);pong_pending_=false;}
+    return SendControlFrame(0xA,payload.data(),payload.size());
+}
+bool WebSocket::Ping() {
+    const bool ok=ServiceControl() && SendControlFrame(0x9, nullptr, 0);
+    if(ok)++pings_;else ++ping_failed_;
+    ESP_LOGI(TAG,"ping sent=%d count=%lu pong=%lu rx=%lu",ok,(unsigned long)pings_.load(),
+        (unsigned long)pongs_.load(),(unsigned long)rx_frames_.load());
+    return ok;
 }
 
 void WebSocket::Close() {
@@ -292,6 +301,9 @@ int WebSocket::GetLastError() {
 
 void WebSocket::OnTcpData(const std::string& data) {
     // 将新数据追加到接收缓冲区
+    if(!handshake_completed_ && receive_buffer_.size()+data.size()>8192){
+        xEventGroupSetBits(handshake_event_group_,HANDSHAKE_FAILED_BIT);return;
+    }
     receive_buffer_.append(data);
     
     if (!handshake_completed_) {
@@ -303,6 +315,7 @@ void WebSocket::OnTcpData(const std::string& data) {
             
             if (handshake_response.find("HTTP/1.1 101") != std::string::npos) {
                 handshake_completed_ = true;
+                connected_=true;
                 // 设置握手成功事件
                 xEventGroupSetBits(handshake_event_group_, HANDSHAKE_SUCCESS_BIT);
             } else {
@@ -353,11 +366,17 @@ void WebSocket::OnTcpData(const std::string& data) {
             header_length += 4;
         }
 
-        if (buffer_size - buffer_offset < header_length + payload_length) break; // 需要更多数据
+        // Bound advertised frame/message sizes before allocation or addition.
+        if(payload_length>65535 || (opcode>=8 && (!fin || payload_length>125))) {
+            connected_=false;if(on_disconnected_)on_disconnected_();
+            receive_buffer_.clear();current_message_.clear();return;
+        }
+        if (payload_length > buffer_size - buffer_offset - header_length) break; // need more bytes
+        ++rx_frames_;
 
         // 解码有效载荷
         std::vector<char> payload(payload_length);
-        memcpy(payload.data(), buffer + buffer_offset + header_length, payload_length);
+        if(payload_length)memcpy(payload.data(), buffer + buffer_offset + header_length, payload_length);
         if (mask) {
             for (size_t i = 0; i < payload_length; ++i) {
                 payload[i] ^= mask_key[i % 4];
@@ -382,6 +401,10 @@ void WebSocket::OnTcpData(const std::string& data) {
                     rx_binary_ = (opcode == 0x2);
                     current_message_.clear();
                 }
+                if(current_message_.size()+payload.size()>65535) {
+                    connected_=false;if(on_disconnected_)on_disconnected_();
+                    receive_buffer_.clear();current_message_.clear();return;
+                }
                 current_message_.insert(current_message_.end(), payload.begin(), payload.end());
                 if (fin) {
                     if (on_data_) {
@@ -391,18 +414,22 @@ void WebSocket::OnTcpData(const std::string& data) {
                     rx_fragmented_ = false;
                 }
                 break;
-            case 0x8: // 关闭帧
+            case 0x8: // close reason text is untrusted/private; log only code
+                close_code_.store(payload.size()>=2 ? (uint16_t(uint8_t(payload[0]))<<8)|uint8_t(payload[1]) : 1005);
+                ESP_LOGI(TAG,"peer close code=%u",unsigned(close_code_.load()));
                 connected_ = false;
                 if (on_disconnected_) {
                     on_disconnected_();
                 }
-                break;
+                receive_buffer_.clear();current_message_.clear();return;
             case 0x9: // Ping
-                std::thread([this, payload, payload_length]() {
-                    SendControlFrame(0xA, payload.data(), payload_length);
-                }).detach();
+                {std::lock_guard<std::mutex> lock(control_mutex_);
+                    // RFC6455 permits answering only the latest outstanding Ping.
+                    pending_pong_.assign(payload.begin(),payload.end());pong_pending_=true;}
                 break;
             case 0xA: // Pong
+                ++pongs_;
+                ESP_LOGI(TAG,"pong count=%lu",(unsigned long)pongs_.load());
                 break;
             default:
                 ESP_LOGE(TAG, "Unknown opcode: %d", opcode);
@@ -421,7 +448,7 @@ void WebSocket::OnTcpData(const std::string& data) {
 
 
 bool WebSocket::SendControlFrame(uint8_t opcode, const void* data, size_t len) {
-    if (len > 125) {
+    if (len > 125 || (len && !data)) {
         ESP_LOGE(TAG, "控制帧有效载荷过大");
         return false;
     }
@@ -450,5 +477,5 @@ bool WebSocket::SendControlFrame(uint8_t opcode, const void* data, size_t len) {
 
     // 发送帧
     std::lock_guard<std::mutex> lock(send_mutex_);
-    return tcp_->Send(frame) >= 0;
+    return tcp_ && connected_ && tcp_->Send(frame)==static_cast<int>(frame.size());
 }

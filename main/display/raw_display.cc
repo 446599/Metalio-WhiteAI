@@ -1,3 +1,4 @@
+#include "power/sleep_service.h"
 #include "raw_display.h"
 #include "chat/history_service.h"
 #include "system/quick_controls.h"
@@ -594,6 +595,8 @@ void RawDisplay::TouchTask() {
     ESP_LOGI(TAG, "raw CST816S touch polling started");
     esp_lcd_touch_point_data_t point{};
     while (true) {
+        if(power::Locked()){touch_down_=false;vTaskDelay(pdMS_TO_TICKS(200));continue;}
+        power::Activity activity;if(!activity){vTaskDelay(pdMS_TO_TICKS(20));continue;}
         uint8_t count = 1;
         bool pressed = false;
         if (touch_ != nullptr && esp_lcd_touch_read_data(touch_) == ESP_OK &&
@@ -655,11 +658,13 @@ void RawDisplay::TouchTask() {
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        activity.Release();vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
 bool RawDisplay::HandleAiKey(bool down) {
+    if(power::Locked())return false;
+    power::Touch(esp_timer_get_time()/1000);
     if (down) {
         if (form_active_.load() || quick_controls_open_.load() || device::QuickControls::Instance().Snapshot().ble_busy) return false;
         if (xiaozhi::AudioSession::GetInstance().RecorderState().mode != audio::RecorderMode::Idle) return false;
@@ -676,6 +681,7 @@ bool RawDisplay::HandleAiKey(bool down) {
 }
 
 void RawDisplay::ShowAiConversation() {
+    if(power::Locked())return;
     SetPowerSaveMode(false);
     DisplayLockGuard lock(this);
     if (animation_running_.load() || form_active_.load() || quick_controls_open_.load()) return;
@@ -689,6 +695,8 @@ void RawDisplay::ShowAiConversation() {
 }
 
 void RawDisplay::HandleHomeTap(int x, int y) {
+    if(power::Locked())return;
+    power::Touch(esp_timer_get_time()/1000);
     if (HandleReminderTap(x,y)) return;
     if (HandleQuickTap(x,y)) return;
     if (HandleHistoryTap(x,y)) return;
@@ -938,6 +946,8 @@ void RawDisplay::HandleHomeTap(int x, int y) {
 }
 
 bool RawDisplay::HandleHardwareKey(HardwareKey key) {
+    if(power::Locked())return false;
+    power::Touch(esp_timer_get_time()/1000);
     if (reminders::Service::Instance().IsActive()) return true;
     if (HandleQuickKey(key)) return true;
     if (HandleHistoryKey(key)) return true;
@@ -1323,7 +1333,24 @@ void RawDisplay::FrameDumpTask() {
                     command[command_size] = '\0';
                     trim_command(command);
 
-                    if (strcasecmp(command, "FRAME?") == 0) {
+                    power::Activity command_activity;
+                    if(!command_activity){send_error("sleep_transition");command_size=0;command[0]=0;continue;}
+                    const bool readonly= !strcasecmp(command,"FRAME?") || !strcasecmp(command,"FRAME_PANEL?") ||
+                        !strcasecmp(command,"FONT?") || !strcasecmp(command,"STATE?") ||
+                        !strcasecmp(command,"XIAOZHI_STATS?") || !strcasecmp(command,"XIAOZHI_NET?") ||
+                        !strcasecmp(command,"SLEEP?") || !strcasecmp(command,"WAKE") || !strcasecmp(command,"SLEEP");
+                    if(power::Locked() && !readonly){send_error("screen_locked");command_size=0;command[0]=0;continue;}
+                    if(!strcasecmp(command,"SLEEP?") || !strcasecmp(command,"XIAOZHI_NET?")){
+                        const bool sleep=!strcasecmp(command,"SLEEP?");
+                        const std::string response=std::string(sleep?"@@SLEEP ":"@@XIAOZHI_NET ")+
+                            (sleep?power::SleepService::Instance().Status():xiaozhi::Client::GetInstance().ConnectionStatus())+"\n";
+                        (void)SerialWriteAll(fd,response.data(),response.size());
+                    }else if(!strcasecmp(command,"WAKE")){
+                        power::SleepService::Instance().Wake();send_command_ack("wake_queued");
+                    }else if(!strcasecmp(command,"SLEEP")){
+                        if(!power::Locked()) { power::SleepService::Instance().Toggle(); }
+                        send_command_ack("sleep_queued");
+                    }else if (strcasecmp(command, "FRAME?") == 0) {
                         DumpFrameToSerial(fd, false);
                     } else if (strcasecmp(command, "FRAME_PANEL?") == 0) {
                         DumpFrameToSerial(fd, true);
@@ -3080,6 +3107,7 @@ void RawDisplay::DrawProductMoreLocked() {
 }
 
 void RawDisplay::DrawProductScreenLocked() {
+    if(lock_screen_.load())return; // no direct redraw may expose content behind the lock page
     // Mark the revision before drawing every page. Recording it afterwards
     // could swallow a provider update that arrives while pixels are drawn.
     last_dashboard_revision_ = dashboard::DashboardData::GetInstance().Revision();
@@ -3128,6 +3156,7 @@ void RawDisplay::DrawProductScreenLocked() {
 }
 
 void RawDisplay::DrawHomeScreenLocked() {
+    if(lock_screen_.load())return;
     DrawProductScreenLocked();
 }
 
@@ -4394,6 +4423,7 @@ void RawDisplay::ShowWipeTestPattern() {
 }
 
 void RawDisplay::UpdateStatusBar(bool update_all) {
+    if(lock_screen_.load())return;
     if(quick_controls_open_.load()) device::QuickControls::Instance().Refresh();
     DisplayLockGuard lock(this);
     if (!portrait_fb_) return;
@@ -4441,6 +4471,7 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
 }
 
 void RawDisplay::SetStatus(const char* status) {
+    if(lock_screen_.load())return;
     DisplayLockGuard lock(this);
     char next_status[sizeof(status_text_)];
     CopyDisplayText(next_status, sizeof(next_status), status);
@@ -4452,6 +4483,7 @@ void RawDisplay::SetStatus(const char* status) {
 }
 
 void RawDisplay::ShowNotification(const char* notification, int duration_ms) {
+    if(lock_screen_.load())return;
     DisplayLockGuard lock(this);
     CopyDisplayText(notification_text_, sizeof(notification_text_), notification);
     const int64_t now_ms = esp_timer_get_time() / 1000;
@@ -4465,6 +4497,7 @@ void RawDisplay::ShowNotification(const char* notification, int duration_ms) {
 }
 
 void RawDisplay::SetPowerSaveMode(bool on) {
+    if(lock_screen_.load())return;
     bool changed = false;
     {
         DisplayLockGuard lock(this);

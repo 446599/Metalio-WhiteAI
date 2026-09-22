@@ -1,4 +1,5 @@
 #pragma once
+#include "metadata_log.h"
 #include <algorithm>
 #include <cstdint>
 #include <mutex>
@@ -15,14 +16,23 @@ public:
     bool Begin(const std::string& operation, const std::string& text) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (text.empty() || text.size() > kMaxBytes || text.find('\0') != std::string::npos || serial_ == UINT32_MAX) return false;
-        ++serial_; operation_ = operation; text_ = text; read_until_ = 0; active_ = true; return true;
+        ++serial_; operation_ = operation; text_ = text; read_until_ = 0; active_ = true;
+        reads_=0; failures_=0; XZ_META("task begin id=%lu bytes=%u", (unsigned long)serial_, (unsigned)text.size()); return true;
     }
     void Cancel() { std::lock_guard<std::mutex> lock(mutex_); active_ = false; text_.clear(); operation_.clear(); read_until_ = 0; }
     bool ReadAll() const { std::lock_guard<std::mutex> lock(mutex_); return active_ && read_until_ == text_.size(); }
+    struct Diagnostics { uint32_t id; size_t bytes, read; uint32_t reads, failures; bool active; };
+    Diagnostics Stats() const { std::lock_guard<std::mutex> lock(mutex_); return {serial_,text_.size(),read_until_,reads_,failures_,active_}; }
     struct Chunk { bool ok=false; uint32_t id=0; size_t next=0,total=0; std::string operation,text,error; };
     Chunk Read(uint32_t id, size_t offset) {
         std::lock_guard<std::mutex> lock(mutex_);
-        Chunk out;
+        Chunk out; ++reads_;
+        struct Trace { ChatTask& task; Chunk& out; size_t offset; ~Trace(){
+            if(!out.ok) ++task.failures_;
+            XZ_META("task read id=%lu offset=%u ok=%d bytes=%u next=%u total=%u complete=%d",
+                (unsigned long)task.serial_, (unsigned)offset, out.ok, (unsigned)(out.ok ? out.next-offset : 0),
+                (unsigned)out.next, (unsigned)out.total, out.ok && out.next==out.total);
+        }} trace{*this,out,offset};
         if (!active_) {out.error="没有待处理设备任务";return out;}
         if ((id && id != serial_) || (offset && !id)) {out.error="任务已改变，请从 offset=0 重新读取";return out;}
         if (offset > text_.size() || offset > read_until_ || (offset < text_.size() && (static_cast<unsigned char>(text_[offset]) & 0xc0) == 0x80)) {
@@ -35,6 +45,7 @@ public:
     }
 private:
     mutable std::mutex mutex_;
+    uint32_t reads_=0,failures_=0;
     uint32_t serial_=0; size_t read_until_=0; bool active_=false;
     std::string operation_,text_;
 };

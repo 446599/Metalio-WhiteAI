@@ -1,3 +1,4 @@
+#include "power/activity.h"
 #include "reader_service.h"
 #include "book_text.h"
 #include "application.h"
@@ -98,6 +99,8 @@ bool Service::SaveBookmark(){
 }
 void Service::Worker(void* arg){
     {
+        power::Activity activity;
+        while(!activity){vTaskDelay(pdMS_TO_TICKS(20));activity.Retry();}
         std::unique_ptr<Job> job(static_cast<Job*>(arg));auto& service=*job->self;
         if(job->command==Command::List)service.ReadList();
         else if(job->command==Command::Open)service.ReadBook(job->filename);

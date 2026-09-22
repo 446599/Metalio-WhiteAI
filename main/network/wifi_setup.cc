@@ -1,3 +1,4 @@
+#include "power/activity.h"
 #include "wifi_setup.h"
 #include "input/text_input.h"
 #include "application.h"
@@ -44,6 +45,8 @@ bool WifiSetup::Connect(const AccessPoint& ap,const std::string& password) {
 }
 void WifiSetup::Worker(void* arg) {
     {
+        power::Activity activity;
+        while(!activity){vTaskDelay(pdMS_TO_TICKS(20));activity.Retry();}
         std::unique_ptr<Job> job(static_cast<Job*>(arg));
         auto& self=*job->owner;auto& station=WifiStation::GetInstance();
         if(job->scan) {

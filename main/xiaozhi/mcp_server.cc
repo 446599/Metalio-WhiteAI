@@ -1,4 +1,5 @@
 #include "mcp_server.h"
+#include "metadata_log.h"
 #include "system_tools.h"
 #include <cJSON.h>
 #include <algorithm>
@@ -117,9 +118,29 @@ std::string McpServer::Handle(const std::string& payload, int64_t now) {
     }
     if (!id) return {}; // Notifications never perform mutating tools or receive responses.
     if (!valid_id) { Error(response.get(), -32600, "Invalid request id"); return Print(response.get()); }
+    const auto* trace_params=Get(request.get(),"params");
+    const char* trace_name=Text(trace_params,"name");
+    // Tool names/argument values originate outside the trust boundary. Only
+    // log names recognised by our schemas; never log arbitrary user strings.
+    bool known=trace_name && system_ && SystemTools::Knows(trace_name);
+    if(trace_name) for(size_t n=0;n<kTools && !known;++n) {
+        Json schema(cJSON_Parse(kSchemas[n]),cJSON_Delete);
+        const char* schema_name=Text(schema.get(),"name");
+        known=schema_name && std::strcmp(schema_name,trace_name)==0;
+    }
+    const bool is_call=std::strcmp(method,"tools/call")==0;
+    struct Trace {
+        const cJSON* response; const char* name; bool call; bool cached=false;
+        ~Trace(){ if(!call)return; if(cached){XZ_META("mcp retry tool=%s cached=1",name);return;}
+            const auto* error=Get(response,"error"); const auto* result=Get(response,"result");
+            const auto* code=Get(error,"code");
+            XZ_META("mcp call tool=%s ok=%d code=%d",name,
+                !error && !cJSON_IsTrue(Get(result,"isError")),cJSON_IsNumber(code)?code->valueint:0);
+        }
+    } trace{response.get(),known ? trace_name : "unknown",is_call};
     const auto id_key = Print(id);
     for (const auto& entry : cache_) if (entry.id == id_key) {
-        if (entry.request == payload) return entry.response;
+        if (entry.request == payload) {trace.cached=true;return entry.response;}
         Error(response.get(), -32600, "Request id already used with different parameters"); return Print(response.get());
     }
     const auto* params = Get(request.get(),"params");

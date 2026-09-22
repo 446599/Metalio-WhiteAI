@@ -2,6 +2,7 @@
 #define TCP_H
 
 
+#include <atomic>
 #include <string>
 #include <functional>
 
@@ -31,7 +32,7 @@ protected:
     std::function<void()> disconnect_callback_;
     
     // 连接状态管理
-    bool connected_ = false;         // 是否可以正常读写数据
+    std::atomic<bool> connected_{false};         // 是否可以正常读写数据
 };
 
 #endif // TCP_H

@@ -130,9 +130,14 @@ DualNetworkBoard* Hal::Dual() {
     return dynamic_cast<DualNetworkBoard*>(&Board::GetInstance());
 }
 
+bool Hal::SuspendAudioForSleep(bool suspend) {
+    if(!audio_started_)return true;
+    auto* codec=Board::GetInstance().GetAudioCodec();
+    return codec && codec->SuspendForSleep(suspend);
+}
 bool Hal::EnsureAudioStarted() {
     auto* codec = Board::GetInstance().GetAudioCodec();
-    if (codec == nullptr) {
+    if (codec == nullptr || codec->IsSleepSuspended()) {
         return false;
     }
     // 等待外置 BT 模块进入模式 1（最多约 2s），否则 I2S Slave 无时钟

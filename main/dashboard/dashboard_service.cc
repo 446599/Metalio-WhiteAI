@@ -1,3 +1,4 @@
+#include "power/activity.h"
 #include "dashboard_service.h"
 
 #include "dashboard_data.h"
@@ -382,6 +383,9 @@ bool DashboardService::FetchQuota() {
 
 void DashboardService::Run() {
     while (true) {
+        if(power::Locked()){sleep_ready_.store(true);vTaskDelay(pdMS_TO_TICKS(100));continue;}
+        sleep_ready_.store(false);
+        power::Activity activity;if(!activity){vTaskDelay(pdMS_TO_TICKS(20));continue;}
         const int64_t now_ms = esp_timer_get_time() / 1000;
         auto& data = DashboardData::GetInstance();
         data.UpdateFreshness(TimestampNow());
@@ -422,7 +426,7 @@ void DashboardService::Run() {
             data.UpdateFreshness(TimestampNow());
             last_refresh_ms_ = now_ms;
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        activity.Release();vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 

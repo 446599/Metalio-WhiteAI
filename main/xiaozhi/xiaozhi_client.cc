@@ -1,4 +1,5 @@
 #include "xiaozhi_client.h"
+#include "metadata_log.h"
 #include "reminders/reminder_service.h"
 
 #include "board.h"
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <string>
 
 namespace xiaozhi {
@@ -132,7 +134,26 @@ void Client::Start() {
     }
 }
 
+std::string Client::ConnectionStatus(){
+    uint32_t epoch;bool inflight;
+    {std::lock_guard<std::mutex> lock(intent_mutex_);epoch=transport_epoch_;inflight=turn_in_flight_;}
+    uint32_t ping=0,pong=0,failed=0,frames=0;int close=0,error=0;
+    std::unique_lock<std::mutex> socket(ws_mutex_,std::try_to_lock);
+    if(socket.owns_lock() && websocket_){
+        const auto h=websocket_->GetHealth();ping=h.sent;pong=h.pong;failed=h.failed;frames=h.received;close=h.close_code;error=websocket_->GetLastError();
+    }
+    const auto task=ChatTask::Instance().Stats();char out[384];
+    std::snprintf(out,sizeof(out),"connected=%d ready=%d epoch=%lu turn=%d ws_busy=%d ping=%lu pong=%lu ping_fail=%lu frames=%lu close=%d tls_error=%d task=%lu bytes=%u read=%u reads=%lu failures=%lu active=%d",
+        IsConnected(),IsSessionReady(),(unsigned long)epoch,inflight,!socket.owns_lock(),(unsigned long)ping,(unsigned long)pong,(unsigned long)failed,(unsigned long)frames,close,error,
+        (unsigned long)task.id,(unsigned)task.bytes,(unsigned)task.read,(unsigned long)task.reads,(unsigned long)task.failures,task.active);
+    return out;
+}
+bool Client::BusyForSleep(){
+    std::lock_guard<std::mutex> lock(intent_mutex_);
+    return turn_in_flight_ || pending_action_.load()!=0 || listen_requested_.load();
+}
 bool Client::ListenStart() {
+    power::Activity lease;if(!lease || power::Locked())return false;
     auto& conversation = Conversation::GetInstance();
     std::lock_guard<std::mutex> lock(intent_mutex_);
     if (listen_requested_.load()) return true;
@@ -192,6 +213,7 @@ void Client::CaptureHistory(const char* status) {
 
 bool Client::BeginTextTask(const std::string& label,const std::string& user,const std::string& request,bool followup) {
     // Caller holds intent_mutex_; no network/SD I/O here.
+    power::Activity lease;if(!lease || power::Locked())return false;
     auto& conversation=Conversation::GetInstance();
     const auto state=conversation.Snapshot();
     if(turn_in_flight_||pending_action_.load()||listen_requested_.load()||state.state==TurnState::Listening||
@@ -203,9 +225,9 @@ bool Client::BeginTextTask(const std::string& label,const std::string& user,cons
     const auto now=esp_timer_get_time()/1000;
     if(last_text_action_ms_ && now-last_text_action_ms_<10000){conversation.SetState(TurnState::Error,"操作过于频繁，请稍后再试");return false;}
     if(!ChatTask::Instance().Begin(label,request))return false;
-    last_text_action_ms_=now;++intent_generation_;action_label_=label;task_expected_=true;
+    last_text_action_ms_=now;task_deadline_ms_.store(now+45000);++intent_generation_;action_label_=label;task_expected_=true;
     if(label!="继续对话"){resume_context_.clear();chat::History::Instance().CancelResume();}
-    pending_prompt_=label; // A short wake event only. Long text is fetched via MCP.
+    pending_prompt_=label+"，请调用self.chat.get_task"; // Short explicit tool request; no original text on detect.
     accept_response_.store(false);followup_turn_.store(true);
     if(followup)conversation.BeginFollowup("正在等待小智读取设备任务");
     else {conversation.Begin();conversation.SetTranscript(user.c_str());conversation.SetState(TurnState::Thinking,"正在等待小智读取设备任务");}
@@ -218,8 +240,10 @@ bool Client::RunQuickAction(QuickAction action) {
     const auto source=Conversation::GetInstance().Snapshot();
     const char* labels[]={"整理灵感","待办草稿","翻译英文"};const auto i=static_cast<unsigned>(action);
     if(i>=3)return false;
-    if(source.transcript.empty()||source.truncated){Conversation::GetInstance().SetState(TurnState::Error,"请先说出完整原文，再选择快捷操作");return false;}
-    return BeginTextTask(labels[i],source.transcript,Conversation::Prompt(action,source.transcript),true);
+    if(source.transcript.empty()||source.truncated){XZ_META("quick rejected action=%u bytes=%u truncated=%d",i,(unsigned)source.transcript.size(),source.truncated);Conversation::GetInstance().SetState(TurnState::Error,"请先说出完整原文，再选择快捷操作");return false;}
+    const bool ok=BeginTextTask(labels[i],source.transcript,Conversation::Prompt(action,source.transcript),true);
+    XZ_META("quick action=%u transcript_bytes=%u state=%u accepted=%d",i,(unsigned)source.transcript.size(),(unsigned)source.state,ok);
+    return ok;
 }
 bool Client::SubmitText(const std::string& text){
     if(text.empty()||text.size()>Conversation::kTranscriptBytes||text.find('\0')!=std::string::npos)return false;
@@ -306,6 +330,7 @@ void Client::PublishStatus(const char* status) {
 }
 
 bool Client::NetworkReady() const {
+    if(GetHAL().IsWifiMode() && !GetHAL().WifiIsConnected())return false;
     const auto snapshot = dashboard::DashboardData::GetInstance().GetSnapshot();
     return std::strstr(snapshot.network, "在线") != nullptr;
 }
@@ -422,7 +447,7 @@ void Client::InvalidateTransportLocked() {
     EndListenWindowLocked();
     pending_action_.store(0);
     pending_prompt_.clear();
-    ChatTask::Instance().Cancel();task_expected_=false;
+    ChatTask::Instance().Cancel();task_expected_=false;task_deadline_ms_.store(0);
     accept_response_.store(false);
     capture_started_.store(false);
     response_started_ms_.store(0);
@@ -434,9 +459,16 @@ void Client::InvalidateTransportLocked() {
 void Client::HandleDisconnect(uint32_t epoch) {
     std::lock_guard<std::mutex> lock(intent_mutex_);
     if (epoch != transport_epoch_) return;
-    if(turn_in_flight_) CaptureHistory("error");
+    const bool interrupted=turn_in_flight_ || pending_action_.load()!=0 || listen_requested_.load();
+    const auto task=ChatTask::Instance().Stats();
+    XZ_META("disconnect epoch=%lu active=%d task=%lu read=%u total=%u",(unsigned long)epoch,
+        interrupted,(unsigned long)task.id,(unsigned)task.read,(unsigned)task.bytes);
+    if(interrupted) CaptureHistory("error");
     InvalidateTransportLocked();
-    Conversation::GetInstance().SetState(TurnState::Error, "连接中断，请重新按住 AI 键");
+    // Idle socket expiry must not replace a completed answer with an error or
+    // disable its archive/translate controls. Never replay microphone input.
+    if(interrupted) Conversation::GetInstance().SetState(TurnState::Error,
+        "连接中断，原文与已收内容保留；联网后重试");
     PublishStatus("小智重连中");
 }
 
@@ -583,9 +615,12 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
     }
     // Event names only, never payloads: enough to reconstruct the conversation
     // timeline from the log without exposing transcripts or credentials.
-    if (json_events_logged_.fetch_add(1) < 60) {
-        ESP_LOGI(kTag, "event: %s", type);
-    }
+    const char* safe_type="unknown";
+    for(const char* allowed : {"hello","goodbye","stt","llm","tts","mcp","error","alert","activation","activate"})
+        if(std::strcmp(type,allowed)==0) {safe_type=allowed;break;}
+    // Do not stop observing events after tools/list consumes the first 60 logs.
+    if(std::strcmp(safe_type,"llm")!=0)
+        XZ_META("event=%s bytes=%u epoch=%lu",safe_type,(unsigned)length,(unsigned long)epoch);
 
     if (std::strcmp(type, "hello") != 0) {
         const auto* tagged_session = cJSON_GetObjectItemCaseSensitive(root, "session_id");
@@ -614,9 +649,11 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
         // hello banner, so the activation state is published after it.
         PublishActivationState(Activation::GetInstance().Snapshot());
     } else if (std::strcmp(type, "goodbye") == 0) {
-        if(turn_in_flight_)CaptureHistory("interrupted");
+        const bool interrupted=turn_in_flight_ || pending_action_.load()!=0;
+        XZ_META("goodbye active=%d epoch=%lu",interrupted,(unsigned long)epoch);
+        if(interrupted)CaptureHistory("interrupted");
         InvalidateTransportLocked();
-        Conversation::GetInstance().SetState(TurnState::Error, "会话已断开，请重新按住 AI 键");
+        if(interrupted) Conversation::GetInstance().SetState(TurnState::Error, "会话已断开，原文保留，请重新连接");
         PublishStatus("小智待连接");
     } else if (std::strcmp(type, "stt") == 0) {
         if (!accept_response_.load() || followup_turn_.load()) { cJSON_Delete(root); return; }
@@ -681,7 +718,7 @@ void Client::HandleData(uint32_t epoch, const char* data, size_t length, bool bi
             response_started_ms_.store(0);
             if(unread){Conversation::GetInstance().SetState(TurnState::Error,"小智未读取设备任务；请检查 MCP 发现和角色设置后重试");CaptureHistory("error");}
             else {Conversation::GetInstance().SetState(TurnState::Done);CaptureHistory("complete");SaveCapsule();}
-            ChatTask::Instance().Cancel();task_expected_=false;
+            ChatTask::Instance().Cancel();task_expected_=false;task_deadline_ms_.store(0);
             PublishStatus("小智在线");
         }
     } else if (std::strcmp(type, "activation") == 0 || std::strcmp(type, "activate") == 0) {
@@ -747,11 +784,25 @@ void Client::SendPendingMcp() {
     }
     const auto message = "{\"session_id\":\"" + JsonEscape(request.session) +
                          "\",\"type\":\"mcp\",\"payload\":" + reply + "}";
-    if (!SendText(message)) HandleDisconnect(request.epoch);
+    const bool sent=SendText(message);
+    XZ_META("mcp_tx epoch=%lu bytes=%u sent=%d",(unsigned long)request.epoch,(unsigned)message.size(),sent);
+    if (!sent) HandleDisconnect(request.epoch);
 }
 
 void Client::Run() {
     while (true) {
+        power::Activity activity;
+        if(!activity){vTaskDelay(pdMS_TO_TICKS(20));continue;}
+        if(power::Locked()) {
+            if(!sleep_ready_.load()) {
+                ReleaseTransport();SavePendingCapsule();
+                chat::History::Instance().Poll(esp_timer_get_time()/1000);
+                const auto history=chat::History::Instance().Snapshot();
+                sleep_ready_.store(!history.busy && history.pending==0 && !save_requested_.load());
+            }
+            activity.Release();ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(100));continue;
+        }
+        sleep_ready_.store(false);
         chat::History::Instance().Poll(esp_timer_get_time()/1000);
         {
             std::lock_guard<std::mutex> lock(intent_mutex_);
@@ -768,12 +819,16 @@ void Client::Run() {
         if (listen_requested_.load() && tick_ms - listen_started_ms_.load() >= 60000) {
             (void)ListenStop();
         }
+        if(task_deadline_ms_.load()>0 && tick_ms>=task_deadline_ms_.load() && !ChatTask::Instance().ReadAll()) {
+            (void)Abort();
+            Conversation::GetInstance().SetState(TurnState::Error,"设备任务未读完，请检查 MCP；原文保留");
+        }
         if (response_started_ms_.load() > 0 && tick_ms - response_started_ms_.load() >= 45000) {
             (void)Abort();
             Conversation::GetInstance().SetState(TurnState::Error, "等待 AI 超时，原文仍保留，可重试");
         }
         if (!enabled_) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            activity.Release();vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
         // Binding comes first: an unbound device can open a socket but the
@@ -806,13 +861,15 @@ void Client::Run() {
             {
                 std::lock_guard<std::mutex> lock(ws_mutex_);
                 disconnected = websocket_ == nullptr || !websocket_->IsConnected();
+                if(!disconnected && !websocket_->ServiceControl()) disconnected=true;
                 if (!disconnected && connected_.load() && now_ms - last_ping_ms_.load() >= kPingIntervalMs) {
-                    websocket_->Ping();
+                    if(!websocket_->Ping())disconnected=true;
                     last_ping_ms_.store(now_ms);
                 }
             }
             if (disconnected) HandleDisconnect(epoch);
         }
+        activity.Release();
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
     }
 }

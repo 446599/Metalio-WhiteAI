@@ -43,11 +43,19 @@ void AudioCodec::Start() {
         ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
     }
 
+    channels_started_=true;
     EnableInput(true);
     EnableOutput(true);
     ESP_LOGI(TAG, "Audio codec started");
 }
 
+bool AudioCodec::SuspendForSleep(bool suspend) {
+    if(!channels_started_ || sleep_suspended_==suspend)return true;
+    auto change=[&](i2s_chan_handle_t h,bool disable){return !h ? ESP_OK : disable?i2s_channel_disable(h):i2s_channel_enable(h);};
+    if(change(tx_handle_,suspend)!=ESP_OK)return false;
+    if(change(rx_handle_,suspend)!=ESP_OK){(void)change(tx_handle_,!suspend);return false;}
+    sleep_suspended_=suspend;return true;
+}
 void AudioCodec::SetOutputVolume(int volume) {
     output_volume_ = volume;
     ESP_LOGI(TAG, "Set output volume to %d", output_volume_);

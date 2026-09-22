@@ -1,3 +1,4 @@
+#include "power/activity.h"
 #include "quick_controls.h"
 #include "application.h"
 #include "hal/hal.h"
@@ -43,6 +44,7 @@ void QuickControls::Refresh(){
     state_.largest_internal=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
 }
 bool QuickControls::SetVolume(int value){
+    power::Activity activity;if(!activity || power::Locked())return false;
     value=std::clamp(value,0,100);GetHAL().SetVolume(value);
     const int actual=GetHAL().GetVolume();
     std::lock_guard<std::mutex> lock(mutex_);
@@ -50,6 +52,7 @@ bool QuickControls::SetVolume(int value){
     return actual==value;
 }
 bool QuickControls::SetAlerts(bool ring,bool vibration){
+    power::Activity activity;if(!activity || power::Locked())return false;
     std::lock_guard<std::mutex> guard(settings_mutex_);
     const uint8_t mode=(ring?1:0)|(vibration?2:0);
     nvs_handle_t handle=0;auto error=nvs_open("quick_controls",NVS_READWRITE,&handle);
