@@ -15,3 +15,6 @@ replace('main/display/font/raw_font.h',
 replace('tools/preview_mono_support.py',
     'void QuickControls::Refresh(){assert(ui_lock_depth==0);preview_quick.version="test-build";}',
     'void QuickControls::Refresh(){assert(ui_lock_depth==0);preview_quick.version="test-build";preview_quick.network="家里的 Wi-Fi";}')
+replace('main/display/raw_display.cc',
+    '    reader_page_ = 0;',
+    '    book_list_page_ = 0;')
