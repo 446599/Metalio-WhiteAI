@@ -1,196 +1,85 @@
-name: Audio memory validation
+name: Publish verified audio repair
 on:
   push:
     branches: [codex/fix-audio-ram]
   workflow_dispatch:
 permissions:
-  contents: read
-env:
-  PYTHONDONTWRITEBYTECODE: '1'
+  contents: write
+  actions: read
 concurrency:
-  group: audio-memory-${{ github.ref }}
-  cancel-in-progress: true
+  group: audio-publish-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: python3 .ci/apply-audio.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-overlay
-          path: |
-            audio-overlay.zip
-            audio-paths.txt
-            audio-hashes.json
-          retention-days: 3
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: audio-prepare-diagnostic
-          path: .ci/combined.patch
-          include-hidden-files: true
-          retention-days: 3
-  host:
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: audio-overlay
-      - run: unzip -o audio-overlay.zip
-      - uses: actions/checkout@v4
-        with:
-          repository: DaveGamble/cJSON
-          ref: v1.7.19
-          path: managed_components/espressif__cjson/cJSON
-          persist-credentials: false
-      - run: python3 -m pip install Pillow
-      - name: Audio memory and existing regressions
-        run: |
-          mkdir -p validation
-          failed=0
-          for test in tools/check_audio_playback.py tools/check_mono_controls.py tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
-            python3 "$test" > "validation/$(basename "$test").log" 2>&1 || failed=1
-            tail -n 15 "validation/$(basename "$test").log"
-          done
-          exit "$failed"
-      - name: Experimental BLE mock contract
-        run: WHITEAI_TEST_BLE=1 python3 tools/check_mono_controls.py > validation/ble-experimental-mock.log 2>&1
-      - name: Real framebuffer and input routing
-        if: always()
-        run: |
-          mkdir -p validation
-          python3 tools/render_ui_preview.py --out build/audio-preview > validation/render.log 2>&1
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: audio-host-validation
-          path: |
-            validation/
-            build/audio-preview/**/*.png
-          retention-days: 7
-  baseline:
-    needs: prepare
-    runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 57df42054fd78934f777a014f0c45bdd25440167
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: audio-overlay
-      - name: Build and measure unchanged failing baseline
-        shell: bash
-        run: |
-          source /opt/esp/idf/export.sh
-          set -o pipefail
-          idf.py build 2>&1 | tee baseline-build.log
-          xtensa-esp32s3-elf-size -A build/metalio-hw-test.elf > baseline-sections.txt
-          xtensa-esp32s3-elf-nm -P --defined-only build/metalio-hw-test.elf > baseline-symbols.txt
-          python3 -c "import zipfile; z=zipfile.ZipFile('audio-overlay.zip'); open('/tmp/check_audio_memory_budget.py','wb').write(z.read('tools/check_audio_memory_budget.py'))"
-          python3 /tmp/check_audio_memory_budget.py --elf build/metalio-hw-test.elf --sdkconfig sdkconfig --report baseline-budget.json && exit 1 || test $? -eq 1
-          python3 -c "import json; r=json.load(open('baseline-budget.json')); assert r['forbidden_ble_symbols'] and r['internal_static_bytes']>151552; print('Expected regression rejected by actual ELF guard')"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: audio-baseline
-          path: |
-            baseline-build.log
-            baseline-sections.txt
-            baseline-symbols.txt
-            baseline-budget.json
-          retention-days: 7
-  firmware:
-    needs: prepare
-    runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: audio-overlay
-      - run: python3 -m zipfile -e audio-overlay.zip .
-      - name: Full product build and enforced audio memory budget
-        shell: bash
-        run: |
-          source /opt/esp/idf/export.sh
-          set -o pipefail
-          idf.py build 2>&1 | tee firmware-build.log
-          xtensa-esp32s3-elf-size -A build/metalio-hw-test.elf > fixed-sections.txt
-          xtensa-esp32s3-elf-nm -P --defined-only build/metalio-hw-test.elf > fixed-symbols.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: audio-build-validation
-          path: |
-            firmware-build.log
-            fixed-sections.txt
-            fixed-symbols.txt
-            build/audio_memory.json
-            build/delivery_manifest.json
-          retention-days: 7
   publish:
-    needs: [host, baseline, firmware]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: codex/fix-audio-ram
-      - name: Check branch has not moved
-        run: test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+      - name: Verify tested run and unchanged branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+          gh api repos/446599/Metalio-WhiteAI/actions/runs/35680222813/jobs --jq '.jobs | map({key:.name,value:.conclusion}) | from_entries' > checked-jobs.json
+          python3 -c "import json; jobs=json.load(open('checked-jobs.json')); assert all(jobs.get(n)=='success' for n in ('prepare','host','baseline','firmware')); print('All source/build tests passed; retry only publication')"
       - uses: actions/download-artifact@v4
         with:
           name: audio-overlay
+          run-id: 35680222813
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
           name: audio-baseline
+          run-id: 35680222813
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: evidence-baseline
       - uses: actions/download-artifact@v4
         with:
           name: audio-build-validation
+          run-id: 35680222813
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: evidence-fixed
-      - name: Verify measured internal RAM recovery and source bytes
+      - name: Verify exact source and memory evidence
         shell: python
         run: |
           from pathlib import Path
-          import json,hashlib,zipfile
+          import hashlib,json,zipfile
           a=json.loads(Path('evidence-baseline/baseline-budget.json').read_text())
           b=json.loads(next(Path('evidence-fixed').rglob('audio_memory.json')).read_text())
-          assert not b['errors'] and not b['forbidden_ble_symbols']
+          assert a['forbidden_ble_symbols'] and not b['errors'] and not b['forbidden_ble_symbols']
           gain=a['internal_static_bytes']-b['internal_static_bytes']
-          assert gain>=18000,('insufficient recovery',gain)
-          zipfile.ZipFile('audio-overlay.zip').extractall('.')
-          for name,expected in json.loads(Path('audio-hashes.json').read_text()).items():
-            data=Path(name).read_bytes()
-            assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected,name
+          assert gain==20108
+          hashes=json.loads(Path('audio-hashes.json').read_text())
+          assert len(hashes)==23
+          with zipfile.ZipFile('audio-overlay.zip') as z:
+            assert set(z.namelist())==set(hashes)
+            for name,expected in hashes.items():
+              data=z.read(name)
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected,name
+              assert not Path(name).is_absolute() and '..' not in Path(name).parts
+              if name.startswith('.github/'):
+                continue
+              p=Path(name);p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
           d=Path('docs/AUDIO_MEMORY_FIX_20260922.md')
           with d.open('a') as f:
             f.write('\n## CI 实际构建结果\n\n')
-            f.write('运行：https://github.com/446599/Metalio-WhiteAI/actions/runs/${{ github.run_id }}\n\n')
-            f.write(f"同环境对照：旧版内部静态 {a['internal_static_bytes']} 字节，修复版 {b['internal_static_bytes']} 字节，减少 {gain} 字节；IRAM 分别 {a['iram_bytes']} / {b['iram_bytes']} 字节。修复 ELF 未链接受检 BLE 入口，旧版被新增护栏实际拒绝。\n\n")
-            f.write('16 组主机检查、独立实验 BLE mock、实际字体/页面路由和完整 ESP-IDF 6.0.1 构建通过。以上不是实体音频验收，未测运行时最大连续块或实际 TTS 峰值。\n')
-      - name: Commit verified files to isolated branch
+            f.write('验证运行：https://github.com/446599/Metalio-WhiteAI/actions/runs/35680222813\n\n')
+            f.write(f"同环境对照：故障版本内部静态 {a['internal_static_bytes']} 字节，修复版 {b['internal_static_bytes']} 字节，减少 {gain} 字节；IRAM 总占用分别 {a['iram_bytes']} / {b['iram_bytes']} 字节。修复 ELF 未链接受检 BLE 入口，故障版被新增检查实际拒绝。\n\n")
+            f.write('上述静态统计包含 vectors 和 text_end 对齐段，排除重复的 .dram0.dummy 别名；与交接文档的正文代码统计口径有小额差异。IRAM .text 从 107351 降至 88727 字节，与交接所列旧版有声代码大小一致，不等同于实测动态堆。\n\n')
+            f.write('16 组主机检查通过，包括 11 个生产播放循环分支场景及 10 项 ELF 检查单测；默认控制/阅读检查 4406 次 CHECK，实验 BLE mock 4408 次，输入/联网 3176 次，记忆 504 次。硬件、RTOS、编解码/I2S 均按测试用途模拟。实际字体绘图和输入路由生成 5 组各 89 帧，共 445 帧（另有 5 张总览），通过缺字和越界检查。\n\n')
+            f.write('完整 ESP-IDF 6.0.1 构建 1398 个步骤通过，应用 3142768 字节（0x2ff470），5 MiB 应用槽剩余约 40%；字体和分区表哈希保持不变。build/audio_memory.json 由构建实际校验生成。以上不是实体音频验收，未测修复后运行时最大连续块或实际 TTS 峰值。\n\n')
+            f.write('验证运行中的 prepare/host/baseline/firmware 均成功；首次 publish 因 Actions token 无工作流写权限而失败。产品源文件由本次独立发布步骤按原产物哈希确认提交；常规工作流配置由仓库连接单独写入，没有修改已通过测试的产品代码，也没有关闭检查。\n')
+      - name: Commit only product source and evidence
         run: |
-          while IFS= read -r path; do git add -- "$path"; done < audio-paths.txt
+          while IFS= read -r path; do
+            case "$path" in .github/*) continue;; esac
+            git add -- "$path"
+          done < audio-paths.txt
+          test "$(git diff --cached --name-only | wc -l)" -eq 22
           git diff --cached --check
           git config user.name 'WhiteAI validation'
           git config user.email '116695909+446599@users.noreply.github.com'
-          git commit -m 'fix(audio): reclaim linked BLE memory and enforce playback budget [skip ci]' -m 'Verified source, negative baseline ELF guard, positive product memory budget, host regressions and full ESP-IDF 6.0.1 build passed. Physical audio remains to be tested.'
+          git commit -m 'fix(audio): reclaim BLE IRAM and validate playback memory [skip ci]' -m 'Product source verified against successful host/ELF/baseline/build jobs in 35680222813. Recover 20108 static internal bytes without reducing audio stacks. Real hardware audio still needs validation.'
           git push origin HEAD:codex/fix-audio-ram
