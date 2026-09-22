@@ -1,6 +1,14 @@
 from pathlib import Path
 import hashlib, json, re, subprocess, zipfile
 patch=b''.join(Path(f'.ci/audio.patch.{i}').read_bytes() for i in range(4))
+old=b"     subprocess.run([str(p/'test')],check=True)\ndiff --git a/tools/preview_mono_support.py"
+new=b"     subprocess.run([str(p/'test'),str(p/'books')],check=True)\ndiff --git a/tools/preview_mono_support.py"
+assert patch.count(old)==1
+patch=patch.replace(old,new)
+assert hashlib.sha256(patch).hexdigest()=='0939703d126cc4f3cf34e4cb22e02b24d3835a8949c1988137e700396f83283a'
+blocks=re.split(rb'(?=^diff --git )',patch,flags=re.M)
+patch=b''.join(Path('.ci/audio-kconfig.patch').read_bytes() if b.startswith(b'diff --git a/main/Kconfig.projbuild ') else b for b in blocks)
+assert hashlib.sha256(patch).hexdigest()=='65d3417547d2e26fb699b0c5e191ac5720a1960d7f4e9dd8f964419737c9dfaa'
 Path('.ci/combined.patch').write_bytes(patch)
 entries=[]
 for block in re.split(rb'(?=^diff --git )',patch,flags=re.M):

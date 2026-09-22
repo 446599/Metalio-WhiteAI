@@ -1,0 +1,23 @@
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 938e0628c599cffdd2da3b908db92aec78a9ea08..b85f75e9e0511263ec9ac299d70816522aa9d2da 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -11,3 +11,18 @@
+ endchoice
+ 
+ endmenu
++
++menu "WhiteAI product features"
++    config WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
++        bool "Experimental BLE discovery (not audio-safe product firmware)"
++        depends on BT_NIMBLE_ENABLED
++        default n
++        help
++            Link the ESP32 BLE controller and enable discovery in quick controls.
++            This consumed about 20 KiB additional shared internal RAM on the
++            affected S3 build, even before the first scan, preventing allocation
++            of the 24 KiB audio playback stack. Keep disabled for the product.
++            This is independent of the external UART/I2S Bluetooth audio module.
++            Enabling requires a separately measured memory/stack budget and
++            on-device TTS, alarm and BLE coexistence validation.
++endmenu
