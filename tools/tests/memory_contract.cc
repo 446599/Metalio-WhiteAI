@@ -6,6 +6,7 @@
 #include "xiaozhi/conversation.h"
 #include "xiaozhi/memory_tools.h"
 #include "xiaozhi/mcp_server.h"
+#include "xiaozhi/chat_task.h"
 #include <cJSON.h>
 #include <atomic>
 #include <cassert>
@@ -70,15 +71,24 @@ int main() {
         auto reply=Parse(server.Handle("{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(++request_id)+
             ",\"method\":\"tools/list\",\"params\":{\"cursor\":\""+cursor+"\"}}",now));
         const auto* result=Get(reply.get(),"result");CHECK(result);const auto* list=Get(result,"tools");
-        CHECK(cJSON_GetArraySize(list)==static_cast<int>(std::min<size_t>(3,26-names.size())));
+        CHECK(cJSON_GetArraySize(list)==static_cast<int>(std::min<size_t>(3,27-names.size())));
         const cJSON* tool;cJSON_ArrayForEach(tool,list) {
             CHECK(names.insert(Str(tool,"name")).second);CHECK(cJSON_IsObject(Get(tool,"inputSchema")));
         }
         cursor=Get(result,"nextCursor") ? Str(result,"nextCursor") : "";++pages;
     } while (!cursor.empty());
-    CHECK(names.size()==26 && pages==9 && xiaozhi::SystemTools::Count()==20);
+    CHECK(names.size()==27 && pages==9 && xiaozhi::SystemTools::Count()==21);
     CHECK(names.count("self.memory.archive")==1 && !xiaozhi::MemoryToolSchema(5));
 
+    auto& mailbox=xiaozhi::ChatTask::Instance();mailbox.Cancel();
+    call_text("self.chat.get_task","{}",false);
+    CHECK(mailbox.Begin("翻译英文",std::string(2000,'a')+"用户原文"));
+    auto task=call("self.chat.get_task");CHECK(Str(task.get(),"operation")=="翻译英文");
+    CHECK(cJSON_IsTrue(Get(task.get(),"complete")));CHECK(mailbox.ReadAll());
+    call_text("self.chat.get_task",R"({"offset":-1})",false);
+    call_text("self.chat.get_task",R"({"offset":1})",false);
+    call_text("self.chat.get_task",R"({"task_id":1,"path":"/sdcard/notes"})",false);
+    mailbox.Cancel();call_text("self.chat.get_task","{}",false);
     auto& conversation=xiaozhi::Conversation::GetInstance();conversation.Clear();
     call_text("self.memory.source",R"({"which":"previous"})",false);
     const std::string raw="卡框磁铁孔采用暂停打印嵌入，ESP32-S3 记录不丢失。";
@@ -246,5 +256,5 @@ int main() {
         if(concurrent.Update(1,1,patch,now,saved,e))++success;});
     for (auto& worker:workers) worker.join();
     CHECK(success==1 && concurrent.List()[0].revision==2);
-    std::printf("Memory contract PASS: %zu checks; cJSON %s; real MCP 26 tools/9 pages; source isolation, archive idempotence, immutable raw text, migration, search, revision conflicts, reminder links, rollback, file recovery and concurrent retries\n",checks,cJSON_Version());
+    std::printf("Memory contract PASS: %zu checks; cJSON %s; real MCP 27 tools/9 pages; source isolation, archive idempotence, immutable raw text, migration, search, revision conflicts, reminder links, rollback, file recovery and concurrent retries\n",checks,cJSON_Version());
 }

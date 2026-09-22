@@ -38,11 +38,11 @@ int main(){
  std::set<std::string> names;std::string cursor;int pages=0;
  do {
   auto r=parse(server.Handle("{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(++id)+",\"method\":\"tools/list\",\"params\":{\"cursor\":\""+cursor+"\"}}",now));
-  assert(!get(r.get(),"error"));const auto* page=get(r.get(),"result");const auto* list=get(page,"tools");assert(cJSON_GetArraySize(list)==static_cast<int>(std::min(size_t{3},size_t{26}-names.size())));
+  assert(!get(r.get(),"error"));const auto* page=get(r.get(),"result");const auto* list=get(page,"tools");assert(cJSON_GetArraySize(list)==static_cast<int>(std::min(size_t{3},size_t{27}-names.size())));
   const cJSON* tool; cJSON_ArrayForEach(tool,list){assert(names.insert(get(tool,"name")->valuestring).second);assert(cJSON_IsObject(get(tool,"inputSchema")));}
   const auto* next=get(page,"nextCursor");cursor=next?next->valuestring:"";++pages;
  } while(!cursor.empty());
- assert(pages==9 && names.size()==26);
+ assert(pages==9 && names.size()==27);
  for (const char* bad:{"1","03","27","-3","3x","999999999"}) {
   auto reply=parse(server.Handle("{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(++id)+",\"method\":\"tools/list\",\"params\":{\"cursor\":\""+bad+"\"}}",now));assert(get(reply.get(),"error"));
  }
@@ -101,7 +101,7 @@ int main(){
  {std::ofstream corrupt(base+".1",std::ios::binary|std::ios::trunc);corrupt<<"bad";}
  notes::SnapshotFile damaged(base);assert(!damaged.Load(restored,valid));assert(!damaged.Save(disk));
  std::remove((base+".0").c_str());std::remove((base+".1").c_str());rmdir(folder);
- std::puts("System MCP OK: 26 tools / 9 pages, strict dispatch, idempotent retries, notifications, note CRUD / reboot / rollback / bounds, focus due, queue capacity / cancellation / expiry");
+ std::puts("System MCP OK: 27 tools / 9 pages, strict dispatch, idempotent retries, notifications, note CRUD / reboot / rollback / bounds, focus due, queue capacity / cancellation / expiry");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='miaoink-system-') as directory:

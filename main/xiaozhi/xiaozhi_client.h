@@ -1,6 +1,8 @@
 #pragma once
 
 #include "conversation.h"
+#include "xiaozhi/chat_task.h"
+#include "chat/history_service.h"
 
 #include <atomic>
 #include <cstdint>
@@ -41,6 +43,10 @@ public:
     bool ListenStop();
     bool Abort();
     bool RunQuickAction(QuickAction action);
+    bool SubmitText(const std::string& text);
+    bool SwitchChat(uint32_t history_id=0);
+    bool DeleteChat(uint32_t history_id);
+
     void SaveCapsule();
     void RestoreCapsule();
 
@@ -64,6 +70,8 @@ private:
     void ReleaseTransport();
     void SavePendingCapsule();
     void SendPendingMcp();
+    bool BeginTextTask(const std::string& label,const std::string& user,const std::string& request,bool followup);
+    void CaptureHistory(const char* status);
     // Closes the microphone side of a manual window without telling the server
     // to stop: used when the utterance is already on its way.
     void EndListenWindowLocked();
@@ -84,6 +92,10 @@ private:
     bool turn_in_flight_ = false;
     bool playback_receiving_ = false;
     std::string pending_prompt_;
+    std::string action_label_, resume_context_;
+    bool task_expected_=false;
+    int64_t last_text_action_ms_=0;
+
     std::atomic<bool> accept_response_{false};
     std::atomic<bool> followup_turn_{false};
     std::atomic<bool> capture_started_{false};

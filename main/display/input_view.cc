@@ -1,4 +1,5 @@
 #include "raw_display.h"
+#include "xiaozhi/xiaozhi_client.h"
 #include "input/keyboard_layout.h"
 #include "font/raw_font.h"
 #include "font/text_layout.h"
@@ -44,6 +45,7 @@ void RawDisplay::OpenEditorLocked(EditTarget target) {
         case EditTarget::NoteProject: editor_.Begin(draft_note_.project,notes::Store::kProjectBytes);break;
         case EditTarget::NoteBody: editor_.Begin(draft_note_.text,notes::Store::kTextBytes,false,true);break;
         case EditTarget::NoteSearch: editor_.Begin(notes_query_,192);break;
+        case EditTarget::ChatMessage: editor_.Begin(chat_draft_,xiaozhi::Conversation::kTranscriptBytes,false,true);break;
         default: return;
     }
     product_page_=ProductPage::TextEntry;form_active_.store(true);
@@ -58,6 +60,7 @@ void RawDisplay::FinishEditorLocked(bool accept) {
             case EditTarget::NoteProject: draft_dirty_|=draft_note_.project!=editor_.Text();draft_note_.project=editor_.Text();break;
             case EditTarget::NoteBody: draft_dirty_|=draft_note_.text!=editor_.Text();draft_note_.text=editor_.Text();break;
             case EditTarget::NoteSearch: notes_query_=editor_.Text();notes_page_=navigation_index_=0;break;
+            case EditTarget::ChatMessage: chat_draft_=editor_.Text();break;
             default: break;
         }
     }
@@ -232,7 +235,7 @@ void RawDisplay::DrawProductTextEntryLocked() {
     switch(edit_target_) {
         case EditTarget::WifiSsid:title="网络名称";break;case EditTarget::WifiPassword:title="Wi-Fi 密码";break;
         case EditTarget::NoteTitle:title="笔记标题";break;case EditTarget::NoteProject:title="所属项目";break;
-        case EditTarget::NoteBody:title="笔记正文";break;case EditTarget::NoteSearch:title="搜索笔记";break;default:break;
+        case EditTarget::NoteBody:title="笔记正文";break;case EditTarget::NoteSearch:title="搜索笔记";break;case EditTarget::ChatMessage:title="文字提问";break;default:break;
     }
     DrawProductHeadingLocked(title,"输入");StrokeRoundRect(32,136,416,136,12,1);
     auto visible=editor_.VisibleText(password_reveal_);visible.insert(editor_.Cursor(),"|");
@@ -254,19 +257,15 @@ void RawDisplay::DrawProductTextEntryLocked() {
     button(32,592,92,56,mode);button(128,592,80,56,editor_.CurrentMode()==input::Mode::Symbols ? "更多" : "123");
     button(212,592,editor_.CurrentMode()==input::Mode::Symbols ? 128 : 236,56,"空格");
     if(editor_.CurrentMode()!=input::Mode::Symbols) {
-        const auto shift=input::ShiftKey();button(shift.x,shift.y,shift.w,shift.h,"↑");
+        const auto shift=input::ShiftKey();button(shift.x,shift.y,shift.w,shift.h,"");
+        DrawProductIconLocked(lucide::Id::ArrowBigUp,shift.x+(shift.w-24)/2,shift.y+(shift.h-24)/2,24,true);
     }
-    // Familiar backspace keycap to the right of M. Draw the icon as geometry
-    // so it never depends on a special Unicode glyph being present.
     const auto erase=input::BackspaceKey(editor_.CurrentMode());
     button(erase.x,erase.y,erase.w,erase.h,"");
-    const int cx=erase.x+erase.w/2,cy=erase.y+erase.h/2;
-    StrokeRect(cx-9,cy-9,24,18,1);
-    for(int i=0;i<=9;++i) {SetPixel(cx-18+i,cy-i,true);SetPixel(cx-18+i,cy+i,true);}
-    for(int i=-4;i<=4;++i) {SetPixel(cx+3+i,cy+i,true);SetPixel(cx+3+i,cy-i,true);}
+    DrawProductIconLocked(lucide::Id::Delete,erase.x+(erase.w-28)/2,erase.y+(erase.h-28)/2,28,true);
     const auto& error=form_message_.empty() ? editor_.Error() : form_message_;
     DrawProductLabelLocked(32,652,416,error.c_str(),ui_font_small);
-    button(32,688,200,48,"取消");button(248,688,200,48,"完成");
+    button(32,688,200,48,"取消");button(248,688,200,48,edit_target_==EditTarget::ChatMessage ? "发送" : "完成");
     DrawProductControlRailLocked(editor_.Secret() ? "密码仅用于本机联网，不发送给 AI" : "全拼选字 / v 代替 ü / 按字节限制长度");
 }
 void RawDisplay::DrawProductWifiLocked(bool credentials) {

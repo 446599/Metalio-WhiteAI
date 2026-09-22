@@ -99,3 +99,12 @@ HOME 离开未保存笔记需确认；PREV 在字段输入页仅取消当前字�
 产品构建默认不链接 ESP32 BLE 扫描。控制栏原蓝牙位置保留纯黑白说明文字，不绘制扫描按钮、不响应原扫描热区；不改变其他控件和页面坐标。验证默认构建反复点击该区不启动任务/扫描、原页面返回与密码保护不变。实验构建的 BLE 扫描路径单独用主机适配器测试，不能冒充默认产品的硬件验证。
 
 完整构建必须通过 `audio-memory-budget`：检查最终 ELF 的 IRAM/DRAM 和控制器入口，不能仅凭 Flash 分区余量验收音频。实际 TTS、铃声与内部最大连续块仍需设备验证。
+
+## Chat history and notes (2026-09-22)
+
+- Home shortcut 2 is Notes, not Recorder; Apps retains Recorder. Touch and SELECT agree.
+- AI idle toolbar: input x188, history x276, new x364, width84 y72 h48. Busy retains stop, with no invisible idle targets.
+- History lists five rows from y192 at84px pitch; details show role-labelled user/assistant messages with text and turn pagination, explicit resume and deletion confirmation. All storage actions run outside display locks.
+- Notes list: five rows y160+92*n; each title +2, summary +44, rule +79. Detail title y148 is below heading rule128; body begins212, ten lines at40px.
+- Lucide upstream Delete/ArrowBigUp replace hand-built keyboard symbols; new shortcuts and history use verified Lucide artwork, native binary sizes only.
+- UI history state must distinguish RAM-pending/SD failure/success. Selection changes must not show the previous session's body while loading. Failed text submission retains editor content; new/switch refuses to discard pending saves.
