@@ -8,15 +8,26 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Archive tracked source for validation
-        run: git archive --format=zip HEAD > sleep-sources.zip
+      - uses: actions/checkout@v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: v1.7.19
+          path: managed_components/espressif__cjson/cJSON
+          persist-credentials: false
+      - name: Baseline regression
+        run: |
+          python3 tools/check_ai_contract.py
+          python3 tools/check_chat_history.py
+          python3 tools/check_mono_controls.py
       - uses: actions/upload-artifact@v4
         with:
-          name: sleep-sources
-          path: sleep-sources.zip
+          name: sleep-cjson
+          path: |
+            managed_components/espressif__cjson/cJSON/cJSON.c
+            managed_components/espressif__cjson/cJSON/cJSON.h
           retention-days: 1
