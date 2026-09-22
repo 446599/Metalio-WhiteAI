@@ -1,0 +1,70 @@
+diff --git a/tools/tests/audio_memory_budget_test.py b/tools/tests/audio_memory_budget_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f8dca0ec7389d02c06663f055494fe770b59f48
+--- /dev/null
++++ b/tools/tests/audio_memory_budget_test.py
+@@ -0,0 +1,40 @@
++"""Budget guard regressions: catches the linked-BLE failure, not just compile errors."""
++import importlib.util
++from pathlib import Path
++import unittest
++spec=importlib.util.spec_from_file_location('budget',Path(__file__).resolve().parents[1]/'check_audio_memory_budget.py')
++budget=importlib.util.module_from_spec(spec);spec.loader.exec_module(budget)
++
++def layout(iram=90000,dram=56000):
++    return f'app.elf :\nsection size addr\n.iram0.text {iram} {0x40374000}\n.dram0.data {dram} {0x3FC90000}\n.flash.text 3000000 {0x42000000}\n.debug_info 400000 0\n'
++
++class Budget(unittest.TestCase):
++    def test_product(self):
++        r=budget.inspect(layout(),'app_main T 42000000 20\n')
++        self.assertEqual(r['errors'],[]);self.assertEqual(r['internal_static_bytes'],146000)
++        self.assertFalse(r['runtime_audio_validated'])
++    def test_original_regression(self):
++        r=budget.inspect(layout(107351,58076),'app_main T 42000000 20\nnimble_port_init T 42001000 40\n')
++        self.assertEqual(len(r['errors']),3)
++    def test_alias_padding_is_not_double_counted(self):
++        r=budget.inspect(layout()+f".dram0.dummy 90000 {0x3FC88000}\n", "app_main T 42000000")
++        self.assertEqual(r["internal_static_bytes"],146000)
++        self.assertFalse(r["errors"])
++    def test_controller_even_under_size_limit(self):
++        self.assertTrue(budget.inspect(layout(),'esp_bt_controller_init T 42001000 40')['errors'])
++    def test_flash_growth_is_not_iram(self):
++        self.assertFalse(budget.inspect(layout().replace('3000000','8000000'),'app_main T 42000000')['errors'])
++    def test_missing_output(self):
++        with self.assertRaises(ValueError): budget.inspect('','app_main T 42000000')
++        with self.assertRaises(ValueError): budget.inspect(layout(),'')
++    def test_wrong_target(self):
++        with self.assertRaises(ValueError): budget.inspect('.text 1000 12345','app_main T 3030')
++    def test_duplicate_section(self):
++        with self.assertRaises(ValueError): budget.inspect(layout()+'.iram0.text 1 1077362688\n','app_main T 42000000')
++    def test_hex(self):
++        self.assertEqual(budget.sections_from_size('.text 0x10 0x42000000'),[('.text',16,0x42000000)])
++    def test_boundary(self):
++        self.assertFalse(budget.inspect(layout(95000,56552),'app_main T 42000000')['errors'])
++        self.assertTrue(budget.inspect(layout(95000,56553),'app_main T 42000000')['errors'])
++
++if __name__=='__main__': unittest.main()
+diff --git a/tools/tests/mono_controls_contract.cc b/tools/tests/mono_controls_contract.cc
+index 4cafab30076de3174a359bd781f3f7d3140813d7..81b6483a2ab0c0ce56d0a76f853a4f65aa9609a6 100644
+--- a/tools/tests/mono_controls_contract.cc
++++ b/tools/tests/mono_controls_contract.cc
+@@ -68,10 +68,19 @@ int main(int argc,char** argv){
+  test_commit_ok=false;CHECK(!settings.SetAlerts(true,false));CHECK(!settings.RingEnabled() && settings.VibrationEnabled());test_commit_ok=true;
+  CHECK(settings.SetVolume(500));CHECK(settings.Snapshot().volume==100);
+  CHECK(settings.SetVolume(-50));CHECK(settings.Snapshot().volume==0);
++#if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
+  xiaozhi::AudioSession::GetInstance().stats.capturing=true;CHECK(!settings.ScanBluetooth());xiaozhi::AudioSession::GetInstance().stats.capturing=false;
+  test_task_ok=false;CHECK(!settings.ScanBluetooth());CHECK(!settings.Snapshot().ble_busy);test_task_ok=true;
+  CHECK(settings.ScanBluetooth());CHECK(!settings.ScanBluetooth());settings.CancelBluetooth();RunTasks();CHECK(settings.Snapshot().ble_cancelled && settings.Snapshot().nearby.empty());
+  CHECK(settings.ScanBluetooth());RunTasks();CHECK(settings.Snapshot().ble_ok && settings.Snapshot().nearby.size()==1);
++#else
++ CHECK(!device::kBleDiscoveryEnabled);
++ const auto pending_tasks=tasks.size();const auto scans=GetHAL().scan_calls;
++ CHECK(!settings.ScanBluetooth());CHECK(!settings.ScanBluetooth());settings.CancelBluetooth();RunTasks();
++ CHECK(!settings.Snapshot().ble_busy && !settings.Snapshot().ble_ok && settings.Snapshot().nearby.empty());
++ CHECK(tasks.size()==pending_tasks && GetHAL().scan_calls==scans);
++ CHECK(settings.Snapshot().message.find("停用")!=std::string::npos);
++#endif
+  // Actual bounded book service reads host files, creates pages and NVS bookmarks.
+  std::ofstream(folder/"chapter.txt")<<std::string(3000,'A');std::ofstream(folder/"ignore.pdf")<<"not txt";
+  auto& books=reader::Service::Instance();CHECK(books.List());CHECK(!books.List());RunTasks();CHECK(books.Get().files.size()==1);

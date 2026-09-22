@@ -1,0 +1,229 @@
+diff --git a/.github/workflows/input-network-validation.yml b/.github/workflows/input-network-validation.yml
+index 30ecb05b08758a2adee7ad040fa5b15487373691..a45b5ac6941a6eba95f24b35e5bf0aa375d0cc58 100644
+--- a/.github/workflows/input-network-validation.yml
++++ b/.github/workflows/input-network-validation.yml
+@@ -51,11 +51,13 @@ jobs:
+         run: |
+           mkdir -p validation
+           failed=0
+-          for test in tools/check_mono_controls.py tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
++          for test in tools/check_audio_playback.py tools/check_mono_controls.py tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
+             python3 "$test" > "validation/$(basename "$test").log" 2>&1 || failed=1
+             tail -n 20 "validation/$(basename "$test").log"
+           done
+           exit "$failed"
++      - name: Experimental BLE mock contract (not a product radio test)
++        run: WHITEAI_TEST_BLE=1 python3 tools/check_mono_controls.py
+       - name: Actual firmware rendering and input routing
+         if: always()
+         run: |
+@@ -90,4 +92,5 @@ jobs:
+           path: |
+             firmware-build.log
+             build/delivery_manifest.json
++            build/audio_memory.json
+           retention-days: 7
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3bf26766b48ed68e54c602ad382827080eeb31c8..de20a2068835c3b3903b2e5902b92c91e7801f6a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,3 +41,23 @@ add_custom_target(delivery-manifest ALL
+     COMMENT "Validating flash boundaries and writing delivery hashes"
+     VERBATIM)
+ add_dependencies(flash delivery-manifest)
++
++# Flash capacity alone does not protect audio: BLE IRAM consumes the same
++# internal RAM that FreeRTOS needs for contiguous capture/playback stacks.
++if(NOT CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY)
++    add_custom_target(audio-memory-budget ALL
++        COMMAND "${delivery_python}" "${CMAKE_SOURCE_DIR}/tools/check_audio_memory_budget.py"
++            --elf "${delivery_build_dir}/${PROJECT_NAME}.elf"
++            --sdkconfig "${SDKCONFIG}"
++            --report "${delivery_build_dir}/audio_memory.json"
++        DEPENDS app
++        BYPRODUCTS "${delivery_build_dir}/audio_memory.json"
++        COMMENT "Checking linked IRAM/DRAM audio headroom"
++        VERBATIM)
++    add_dependencies(delivery-manifest audio-memory-budget)
++    if(TARGET app-flash)
++        add_dependencies(app-flash audio-memory-budget)
++    endif()
++else()
++    message(WARNING "Experimental BLE discovery: not an audio-safe product build")
++endif()
+diff --git a/docs/AUDIO_MEMORY_FIX_20260922.md b/docs/AUDIO_MEMORY_FIX_20260922.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff1940942c602c7498b41a5bb47aa343a609e6c2
+--- /dev/null
++++ b/docs/AUDIO_MEMORY_FIX_20260922.md
+@@ -0,0 +1,48 @@
++# 扬声器无声：BLE 静态内存回归修复
++
++基线：`57df42054fd78934f777a014f0c45bdd25440167`；上一版用户实测有声：`093e9df1811de0b0670879bffb61d9cd138df8c4`。
++证据来源：用户提供 `WhiteAI-Audio-Memory-Handoff-20260922.zip`。
++
++## 症状与判断
++
++交接记录报告 UI、Wi-Fi 和会话正常，但 AI 回答及闹钟无声。附件的闹钟日志可独立确认播放任务连续创建失败，最大连续内部内存为 13824 字节；所需播放栈为 24576 字节。约 8 MiB PSRAM 空闲不能满足此内部栈申请。交接记录的静态段表报告共享内部静态占用从 146155 增至 166455 字节，其中 IRAM text 从 88727 增至 107351。符号之和与 ELF 段之和不同，不把两种统计混用。
++
++原控制栏的 BLE 扫描通过 NimBLE 初始化函数把控制器代码和数据链接入固件；扫描结束释放任务和控制器动态资源，不能去掉镜像中常驻的 IRAM 代码。采用交接建议的“产品移除 BLE 发现”路线，优先恢复语音与铃声，不根据仅有铃声的栈水位盲目缩栈。
++
++## 修改范围
++
++1. 新增默认关闭的 `WHITEAI_EXPERIMENTAL_BLE_DISCOVERY` 编译选项。默认 CMake 不编入扫描实现、不由主组件依赖 `idf::bt`；旧 HAL 接口返回明确不支持，不加载控制器。实验选项保留原扫描源码，但开启后必须独立验证静态/动态内存预算，不能作为普通产品构建发布。
++2. 控制栏取消默认 BLE 扫描按钮和热区，只保留蓝牙音频模式说明。Wi-Fi、媒体音量、铃声/震动、笔记、阅读、键盘与黑白字体逻辑不变。外置 UART/I2S 蓝牙音频模块与 ESP32 BLE 控制器不同，未更改外置模块、引脚或 AT 命令。
++3. 保持采集 28672、播放 24576、自检 49152 字节的内部栈及原分配器，不移到 PSRAM。补充真实 PlaybackLoop 每条退出/continue 路径的低水位统计，包括 TTS 解码、重采样、I2S 成功及错误路径。
++4. 构建新增 `audio-memory-budget`，检查最终 ELF 而非只检查 Flash 镜像容量。上限 IRAM 97280、共享内部静态 151552 字节；拒绝链接 NimBLE/控制器入口。`.dram0.dummy` 是已计入 IRAM 的地址别名填充，不重复累计。此门限是静态回归护栏，不保证运行时最大连续块。
++
++没有修改 sdkconfig、分区、NVS 数据格式、字体文件、LUT、屏幕 DMA bounce 缓冲、USB 初始化或音频采集/播放协议。
++
++## 诊断字段
++
++`XIAOZHI_STATS?` 保留原有字段，并增加：
++
++| 字段 | 含义 |
++| --- | --- |
++| `play_stack` | 播放任务观察到的最小剩余栈字节数 |
++| `play_tts_stack` | 至少处理过一个 TTS 队列包时观察到的任务低水位 |
++| `play_tts_n` | TTS 队列包路径采样次数；0 表示尚未测到 |
++| `play_alloc_fail` | 播放任务创建失败计数 |
++| `play_need` | 本构建播放栈字节数（24576） |
++| `largest` | 当前 INTERNAL + 8BIT 最大连续空闲块 |
++
++`play_tts_stack` 是 FreeRTOS 任务生命周期高水位的快照，包含先前更深的路径，不是独立的 Opus 栈占用。错误解码路径也采样，故不能只凭 `play_tts_n>0` 声称播音成功，应结合 `decoded`、错误计数和实际声音。0 剩余不会被后续较大值覆盖。
++
++## 可复现验证
++
++`python3 tools/check_audio_playback.py` 提取并执行生产 PlaybackLoop/任务创建逻辑，模拟 RTOS、编解码器和 I2S，覆盖分配失败后重试、11 种播放路径、并发最小值和有效 0 水位；同时运行 ELF 护栏单元测试。不是把模拟编解码作为真实 TTS。
++
++`python3 tools/check_mono_controls.py` 验证默认无扫描实现；`WHITEAI_TEST_BLE=1 python3 tools/check_mono_controls.py` 仅验证实验 UI/调度 mock。原回归和真实字体预览继续执行。
++
++完整 ESP-IDF 6.0.1 `idf.py build` 自动生成 `build/audio_memory.json` 并实施门限；缺工具、缺 ELF、段解析异常或超预算都失败，不降级成通过。最终运行记录和构建前后数值在提交交付时补记。
++
++## 上机验收
++
++关闭占用串口的浏览器/监视器。在原 ESP-IDF 6.0.1 环境重新 build，检查内存报告通过、设备分区和实际端口一致后仅执行 app-flash，不重写分区、OTA 选择、NVS 或字体。
++
++先验证本地闹钟出声，再进行真实语音对话并检查 `decoded` 增加、`play_tts_n>0`、`play_alloc_fail` 不增长和实际扬声器声音。随后反复进入控制栏、Wi-Fi 页面、中文笔记/阅读，再复测铃声与 TTS。记录 `largest` 与栈水位。编译和主机测试不替代这些物理验收；本次未连接实体设备。
+diff --git a/docs/MONO_CONTROLS.md b/docs/MONO_CONTROLS.md
+index 7b5f55606ea8f9bd6cb39835dfc2f473386682dd..7b158bd8201f38245b1185e778ec71c612d5479f 100644
+--- a/docs/MONO_CONTROLS.md
++++ b/docs/MONO_CONTROLS.md
+@@ -16,7 +16,7 @@
+ 
+ - 音量：减/加与点按横条，范围 0–100，调用原音量接口；设置不在显示锁内执行。
+ - 网络：进入原 Wi-Fi 扫描、密码和连接流程；编辑未完成时不跳走，提示先完成或取消输入。原 4G/Wi-Fi 选择逻辑不变。
+-- 蓝牙：调用已有 HAL 的实际 BLE 扫描，可停止并分页查看附近广播设备。扫描结束释放栈；仅允许音频空闲时启动，闹钟到期请求停止扫描。**不是蓝牙耳机配对，也不是外置音频模块电源开关。**官方板级无 BT_POWER 控制，切换 AT 音频模式可能影响 I2S 时钟，故不提供假开关，不发送未经验证的关机/配对指令。
++- 蓝牙：**默认产品构建已移除 BLE 扫描入口**，该行仅说明蓝牙音频保持原模式；不响应原扫描热区。57df420 的 BLE 发现使控制器 IRAM 静态占用增加，导致 24 KiB 播放栈创建失败。独立实验选项 `CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY` 默认关闭；开启后的构建不属于已验证的语音产品配置。外置 UART/I2S 音频模块不受此选项控制，未发送新的 AT 命令。参见 `AUDIO_MEMORY_FIX_20260922.md`。
+ - 铃声/震动：分别控制闹钟与日程提醒，NVS 成功提交后才改变状态；失败保留旧配置。两者关闭仍显示到期卡片。音量 0 仍使铃声静音；这不关闭原有触摸短震。铃声播放失败最多每 5 秒重试，避免反复申请音频栈。
+ 
+ ## 功能逐项归类
+@@ -46,4 +46,4 @@
+ 
+ 主机命令：`python3 tools/check_mono_controls.py`、原 14 组检查及 `python3 tools/render_ui_preview.py`。新测试执行实际 Font/Reader/QuickControls/NoteWriter 代码，硬件、NVS、任务和 BLE 由受控适配器模拟；读书文件使用临时目录。预览用仓库实际位图和绘图/路由，不能替代触摸/无线电/屏幕光学验收。
+ 
+-仍用 ESP-IDF 6.0.1 `idf.py build`，确认设备分区与端口后仅 `app-flash`。不必重刷字体、NVS、分区或 OTA 选择。建议真机检查：首次进入控制栏内存余量；调音量后语音与铃声；静默到期卡片；BLE 扫描和取消之后小智仍有声音；密码页上下拉不泄露明文；两轮小智整理后触摸归档；中文 TXT 重启后恢复位置。
++仍用 ESP-IDF 6.0.1 `idf.py build`，确认设备分区与端口后仅 `app-flash`。不必重刷字体、NVS、分区或 OTA 选择。建议真机检查：首次进入控制栏内存余量；调音量后语音与铃声；静默到期卡片；反复打开控制栏后小智与铃声仍有声音；密码页上下拉不泄露明文；两轮小智整理后触摸归档；中文 TXT 重启后恢复位置。
+diff --git a/docs/UI_QA_CONTRACT.md b/docs/UI_QA_CONTRACT.md
+index 388c5d8bde89f3afce61f6fdde7794955e093a22..fcca4319c04205ba2ddecb8f735e39f9ac2874eb 100644
+--- a/docs/UI_QA_CONTRACT.md
++++ b/docs/UI_QA_CONTRACT.md
+@@ -93,3 +93,9 @@ HOME 离开未保存笔记需确认；PREV 在字段输入页仅取消当前字
+ 字母第三排键宽36、间距4、起点x90、y528；Shift 为(32,528,48,56)，退格为(384,528,64,56)。字母模式空格为(212,592,236,56)，符号页退格为(344,592,104,56)。绘图/命中共用 `keyboard_layout.h`。
+ 
+ 阅读以实际 UTF-8 TXT 页替代旧演示，内容416px宽，每页12行，y172起行距38，书库行高56/pitch64，底部上一页/下一页y672。测试覆盖空文件、损坏编码、缺卡、长文件和书签失败；不把失败请求显示为成功保存。
++
++## 音频内存回归保护（2026-09-22）
++
++产品构建默认不链接 ESP32 BLE 扫描。控制栏原蓝牙位置保留纯黑白说明文字，不绘制扫描按钮、不响应原扫描热区；不改变其他控件和页面坐标。验证默认构建反复点击该区不启动任务/扫描、原页面返回与密码保护不变。实验构建的 BLE 扫描路径单独用主机适配器测试，不能冒充默认产品的硬件验证。
++
++完整构建必须通过 `audio-memory-budget`：检查最终 ELF 的 IRAM/DRAM 和控制器入口，不能仅凭 Flash 分区余量验收音频。实际 TTS、铃声与内部最大连续块仍需设备验证。
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 14f3fbb36f91b47b951cba4c562afd52f7f35494..2e061b459e2993f8d5110abd4af1bfb856a190fa 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -35,7 +35,6 @@ set(SOURCES
+             "xiaozhi/xiaozhi_audio.cc"
+             "xiaozhi/xiaozhi_activation.cc"
+             "hal/hal.cc"
+-            "hal/hal_ble_scan.cc"
+             "system_info.cc"
+             "application.cc"
+             "settings.cc"
+@@ -44,6 +43,14 @@ set(SOURCES
+             "main.cc"
+             )
+ 
++# Do not merely defer nimble_port_init until the first tap: referenced
++# controller objects already occupy IRAM at link time and reduce DRAM heap.
++if(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY)
++    list(APPEND SOURCES "hal/hal_ble_scan.cc")
++else()
++    list(APPEND SOURCES "hal/hal_ble_unavailable.cc")
++endif()
++
+ set(INCLUDE_DIRS
+             "."
+             "display"
+@@ -104,7 +111,10 @@ idf_component_register(SRCS ${SOURCES}
+                     WHOLE_ARCHIVE
+                     )
+ 
+-target_link_libraries(${COMPONENT_LIB} PRIVATE idf::bt idf::fatfs idf::sdmmc idf::esp_driver_sdmmc idf::espressif__zlib idf::esp_partition idf::espcoredump idf::esp-ml307 idf::esp-wifi-connect)
++target_link_libraries(${COMPONENT_LIB} PRIVATE idf::fatfs idf::sdmmc idf::esp_driver_sdmmc idf::espressif__zlib idf::esp_partition idf::espcoredump idf::esp-ml307 idf::esp-wifi-connect)
++if(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY)
++    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::bt)
++endif()
+ if(TARGET idf::espressif__esp_tinyusb)
+     # ESP-IDF 6 no longer exports the legacy idf::usb target; the TinyUSB
+     # component brings the USB implementation transitively.
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+new file mode 100644
+index 0000000000000000000000000000000000000000..88009f67a6277a660031882be8d6aca1cc670b4e
+--- /dev/null
++++ b/main/Kconfig.projbuild
+@@ -0,0 +1,14 @@
++menu "WhiteAI product features"
++    config WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
++        bool "Experimental BLE discovery (not audio-safe product firmware)"
++        depends on BT_NIMBLE_ENABLED
++        default n
++        help
++            Link the ESP32 BLE controller and enable discovery in quick controls.
++            This consumed about 20 KiB additional shared internal RAM on the
++            affected S3 build, even before the first scan, preventing allocation
++            of the 24 KiB audio playback stack. Keep disabled for the product.
++            This is independent of the external UART/I2S Bluetooth audio module.
++            Enabling requires a separately measured memory/stack budget and
++            on-device TTS, alarm and BLE coexistence validation.
++endmenu
+diff --git a/main/audio/stack_watermark.h b/main/audio/stack_watermark.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c43cc871cef0ec386bb494e7ae61c495459ec2d6
+--- /dev/null
++++ b/main/audio/stack_watermark.h
+@@ -0,0 +1,24 @@
++#pragma once
++#include <atomic>
++#include <cstdint>
++#include <limits>
++
++namespace audio {
++// Keep the lowest observed free-stack value across task lifetimes. UINT32_MAX
++// means unmeasured internally: zero is a valid and important low-water sample.
++class StackWatermark {
++public:
++    void Observe(uint32_t bytes) {
++        auto old = minimum_.load(std::memory_order_relaxed);
++        while (bytes < old && !minimum_.compare_exchange_weak(
++            old, bytes, std::memory_order_relaxed, std::memory_order_relaxed)) {}
++    }
++    uint32_t FreeBytes() const {
++        const auto value = minimum_.load(std::memory_order_relaxed);
++        return value == kUnmeasured ? 0 : value;
++    }
++private:
++    static constexpr uint32_t kUnmeasured = std::numeric_limits<uint32_t>::max();
++    std::atomic<uint32_t> minimum_{kUnmeasured};
++};
++}

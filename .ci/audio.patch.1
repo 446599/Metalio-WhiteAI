@@ -1,0 +1,319 @@
+diff --git a/main/display/quick_controls_view.cc b/main/display/quick_controls_view.cc
+index 2bcb27f1bba5fc3305d1088d95bf8b734d2a9587..2884ee43e9218813593a304394643528da679113 100644
+--- a/main/display/quick_controls_view.cc
++++ b/main/display/quick_controls_view.cc
+@@ -57,7 +57,7 @@ bool RawDisplay::HandleQuickTap(int x,int y) {
+         else if(hit(32,280,416,64)) {
+             if(form_active_.load()) busy_form=true;
+             else {quick_controls_open_.store(false);product_page_=ProductPage::WifiList;wifi_page_=0;wifi_switch_confirm_=false;navigation_index_=0;form_message_.clear();action=Action::Network;}
+-        } else if(hit(32,360,416,64)){quick_bluetooth_=true;quick_ble_page_=0;}
++        } else if(device::kBleDiscoveryEnabled && hit(32,360,416,64)){quick_bluetooth_=true;quick_ble_page_=0;}
+         else if(hit(32,456,200,64)){ring=!ring;action=Action::Ring;}
+         else if(hit(248,456,200,64)){vibration=!vibration;action=Action::Vibration;}
+         if(action!=Action::Close){DrawHomeScreenLocked();FlushLocked();}
+@@ -104,7 +104,12 @@ void RawDisplay::DrawProductQuickControlsLocked() {
+         if(fill) FillRect(100,212,fill,16,true);
+         button(32,280,416,64,"");DrawProductLabelLocked(48,288,384,"网络 · 点击设置",ui_font_small);
+         DrawProductLabelLocked(48,316,384,state.network.c_str(),ui_font_small);
+-        button(32,360,416,64,"蓝牙 · 扫描附近 BLE 设备");
++        if(device::kBleDiscoveryEnabled) button(32,360,416,64,"蓝牙 · 扫描附近 BLE 设备");
++        else {
++            // Informational text only: no border, scan button or hidden hit area.
++            DrawProductLabelLocked(48,360,384,"蓝牙音频保持原模式",ui_font_small);
++            DrawProductLabelLocked(48,392,384,"BLE 发现已停用，优先保障语音",ui_font_small);
++        }
+         DrawText(32,428,"闹钟与日程的提醒方式",ui_font_small);
+         button(32,456,200,64,state.ring ? "铃声 · 开" : "铃声 · 关");
+         button(248,456,200,64,state.vibration ? "震动 · 开" : "震动 · 关");
+diff --git a/main/display/raw_display.cc b/main/display/raw_display.cc
+index b966b251209187d00cf8ae6ea17a4828c8284b95..e3d00ed6740059134cd534e1f77339cb57eb64e3 100644
+--- a/main/display/raw_display.cc
++++ b/main/display/raw_display.cc
+@@ -1438,7 +1438,7 @@ void RawDisplay::FrameDumpTask() {
+                         const auto& client = xiaozhi::Client::GetInstance();
+                         stats.transport_connected = client.IsConnected();
+                         stats.session_ready = client.IsSessionReady();
+-                        char response[512];
++                        char response[768];
+                         const int size = std::snprintf(
+                             response, sizeof(response),
+                             "@@XIAOZHI_STATS frames_sent=%lu send_err=%lu recv=%lu dropped=%lu "
+@@ -1446,7 +1446,8 @@ void RawDisplay::FrameDumpTask() {
+                             "peak=%d up=%d down=%d out=%d frame_ms=%d cap=%d play=%d "
+                             "enc=%d dec=%d gated=%lu opens=%lu params=%d ws=%d sess=%d "
+                             "enabled=%d ver=%d "
+-                            "cap_stack=%lu play_stack=%lu heap=%lu psram=%lu reset=%s\n",
++                            "cap_stack=%lu play_stack=%lu heap=%lu psram=%lu reset=%s "
++                            "play_tts_stack=%lu play_tts_n=%lu play_alloc_fail=%lu play_need=%lu largest=%lu\n",
+                             static_cast<unsigned long>(stats.frames_sent),
+                             static_cast<unsigned long>(stats.send_errors),
+                             static_cast<unsigned long>(stats.packets_received),
+@@ -1469,8 +1470,13 @@ void RawDisplay::FrameDumpTask() {
+                             static_cast<unsigned long>(stats.playback_stack_free),
+                             static_cast<unsigned long>(stats.internal_heap_free),
+                             static_cast<unsigned long>(stats.psram_free),
+-                            ResetReasonName(esp_reset_reason()));
+-                        if (size > 0) {
++                            ResetReasonName(esp_reset_reason()),
++                            static_cast<unsigned long>(stats.playback_tts_stack_free),
++                            static_cast<unsigned long>(stats.playback_tts_stack_samples),
++                            static_cast<unsigned long>(stats.playback_create_failures),
++                            static_cast<unsigned long>(stats.playback_stack_bytes),
++                            static_cast<unsigned long>(stats.internal_largest_free));
++                        if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
+                             (void)SerialWriteAll(fd, response, static_cast<size_t>(size));
+                         }
+                     } else if (strcasecmp(command, "RECORDER_STATE?") == 0) {
+diff --git a/main/hal/hal.h b/main/hal/hal.h
+index 54632e3351606c7a602d00280a2952a6c5025d6a..e43786fc90ba97b9bda116fbb12069125545a383 100644
+--- a/main/hal/hal.h
++++ b/main/hal/hal.h
+@@ -98,7 +98,8 @@ public:
+     bool IsBtModeReady() const;
+     // 发 AT 并收集应答；须在后台任务调用。
+     bool BtSendCollect(const char* cmd, std::string& out, uint32_t timeout_ms = 2000);
+-    // ESP NimBLE 扫描周边 BLE；须在后台任务调用。结束后 deinit 释放。
++    // Product returns unavailable without linking NimBLE. Experimental BLE
++    // discovery must be selected at build time; call only on a worker task.
+     bool BleScan(std::vector<HalBtDevice>& out, std::string& detail, uint32_t timeout_ms = 8000,
+                  const std::function<bool()>& cancelled = {});
+ 
+diff --git a/main/hal/hal_ble_unavailable.cc b/main/hal/hal_ble_unavailable.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..dea532453b6672b2f66f34cdbbae783924845977
+--- /dev/null
++++ b/main/hal/hal_ble_unavailable.cc
+@@ -0,0 +1,13 @@
++#include "hal.h"
++
++// A real unavailable implementation, not a fake scan result. Keeping this
++// translation unit independent of NimBLE prevents controller IRAM from being
++// linked even if an old diagnostic caller still invokes the HAL entry point.
++bool Hal::BleScan(std::vector<HalBtDevice>& out, std::string& detail,
++                  uint32_t timeout_ms, const std::function<bool()>& cancelled) {
++    (void)timeout_ms;
++    (void)cancelled;
++    out.clear();
++    detail = "BLE 发现已停用，优先保障语音与铃声";
++    return false;
++}
+diff --git a/main/system/build_features.h b/main/system/build_features.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..db642042f398e54330e515720c051681e31508b0
+--- /dev/null
++++ b/main/system/build_features.h
+@@ -0,0 +1,14 @@
++#pragma once
++#ifdef ESP_PLATFORM
++#include "sdkconfig.h"
++#endif
++
++// Host tests default to the same product configuration as firmware. The
++// optional macro can only enable the experimental discovery variant.
++namespace device {
++#if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
++inline constexpr bool kBleDiscoveryEnabled = true;
++#else
++inline constexpr bool kBleDiscoveryEnabled = false;
++#endif
++}
+diff --git a/main/system/quick_controls.cc b/main/system/quick_controls.cc
+index 7dee6b4cb7a434559b34184f7ab562e81f933398..2575f3ddda81b6d61260aea7aadb1db69e885e50 100644
+--- a/main/system/quick_controls.cc
++++ b/main/system/quick_controls.cc
+@@ -60,6 +60,12 @@ bool QuickControls::SetAlerts(bool ring,bool vibration){
+     ++state_.revision;return error==ESP_OK;
+ }
+ bool QuickControls::ScanBluetooth(){
++#if !defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) || !CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
++    std::lock_guard<std::mutex> lock(mutex_);
++    state_.message="BLE 发现已停用，优先保障语音与铃声";
++    state_.ble_busy=false;state_.ble_ok=false;state_.nearby.clear();++state_.revision;
++    return false;
++#else
+     const auto stats=xiaozhi::AudioSession::GetInstance().Stats();
+     const auto turn=xiaozhi::Conversation::GetInstance().Snapshot().state;
+     const bool speech=turn!=xiaozhi::TurnState::Idle && turn!=xiaozhi::TurnState::Done && turn!=xiaozhi::TurnState::Error;
+@@ -75,11 +81,13 @@ bool QuickControls::ScanBluetooth(){
+         state_.ble_busy=false;state_.message="内存不足，蓝牙扫描未启动";++state_.revision;return false;
+     }
+     return true;
++#endif
+ }
+ void QuickControls::CancelBluetooth(){
+     std::lock_guard<std::mutex> lock(mutex_);
+     if(state_.ble_busy){cancel_scan_.store(true);state_.message="正在停止蓝牙扫描";++state_.revision;}
+ }
++#if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
+ void QuickControls::ScanTask(void* arg){
+     {
+         auto& self=*static_cast<QuickControls*>(arg);
+@@ -97,4 +105,5 @@ void QuickControls::ScanTask(void* arg){
+     }
+     Application::GetInstance().RequestStatusUpdate(true);vTaskDelete(nullptr);
+ }
++#endif
+ } // namespace device
+diff --git a/main/system/quick_controls.h b/main/system/quick_controls.h
+index 2874a26cf2313b8f3523f3896cd6e009a5f87119..795fd09d62eea6c15353bfa2fcb546f2142861ce 100644
+--- a/main/system/quick_controls.h
++++ b/main/system/quick_controls.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "build_features.h"
+ #include <atomic>
+ #include <cstdint>
+ #include <mutex>
+@@ -17,7 +18,8 @@ struct QuickSnapshot {
+     std::vector<NearbyDevice> nearby;
+ };
+ // Short settings work executes outside the framebuffer lock on the event task.
+-// The BLE scan gets one temporary worker, not another permanent internal stack.
++// BLE discovery is omitted from the product build: even an idle linked
++// controller costs IRAM. Only the explicitly experimental build has a worker.
+ class QuickControls {
+ public:
+     static QuickControls& Instance();
+diff --git a/main/xiaozhi/xiaozhi_audio.cc b/main/xiaozhi/xiaozhi_audio.cc
+index 93cd150ffedb6d4a9566fddc2b8cf786c2a849eb..a06428d0359ae559f57c65de7e9c648dd144340c 100644
+--- a/main/xiaozhi/xiaozhi_audio.cc
++++ b/main/xiaozhi/xiaozhi_audio.cc
+@@ -325,7 +325,7 @@ AudioSession& AudioSession::GetInstance() {
+ AudioSession::AudioSession() {
+     EnsureQueue();
+     // The capture task already stays resident after the first conversation.
+-    // Reserve its contiguous 40 KiB before TLS and ringtone playback fragment
++    // Reserve its contiguous 28 KiB before TLS and ringtone playback fragment
+     // internal RAM. It stays idle: no microphone or encoder is opened here.
+     (void)EnsureCaptureTask();
+ }
+@@ -468,6 +468,7 @@ bool AudioSession::EnsurePlaybackTask() {
+             if (CreateAudioTask(PlaybackTaskEntry, "xz_playback", kPlaybackStackBytes, this,
+                                 kAudioTaskPriority, &playback_task_) != pdPASS) {
+                 playback_task_ = nullptr;
++                playback_create_failures_.fetch_add(1);
+                 ESP_LOGE(kTag,
+                          "playback task creation failed, internal free=%u largest=%u psram free=%u",
+                          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+@@ -588,7 +589,12 @@ AudioSessionStats AudioSession::Stats() const {
+     stats.output_rate = OutputRate();
+     stats.frame_duration_ms = TargetFrameMs();
+     stats.capture_stack_free = capture_stack_free_.load();
+-    stats.playback_stack_free = playback_stack_free_.load();
++    stats.playback_stack_free = playback_stack_.FreeBytes();
++    stats.playback_tts_stack_samples = playback_tts_stack_samples_.load();
++    stats.playback_tts_stack_free = playback_tts_stack_.FreeBytes();
++    stats.playback_create_failures = playback_create_failures_.load();
++    stats.playback_stack_bytes = kPlaybackStackBytes;
++    stats.internal_largest_free = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+     stats.internal_heap_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+     stats.psram_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+     stats.capturing = capture_requested_.load();
+@@ -992,6 +998,16 @@ void AudioSession::PlaybackTaskEntry(void* arg) {
+     vTaskDelete(nullptr);
+ }
+ 
++void AudioSession::RecordPlaybackStack(bool tts) {
++    // ESP-IDF reports bytes, unlike upstream FreeRTOS's word-based API.
++    const uint32_t free_bytes = uxTaskGetStackHighWaterMark(nullptr);
++    playback_stack_.Observe(free_bytes);
++    if (tts) {
++        playback_tts_stack_.Observe(free_bytes);
++        playback_tts_stack_samples_.fetch_add(1);
++    }
++}
++
+ void AudioSession::PlaybackLoop() {
+     ESP_LOGI(kTag, "playback task start");
+     Packet packet;
+@@ -1001,6 +1017,13 @@ void AudioSession::PlaybackLoop() {
+     std::vector<int16_t> cue(static_cast<size_t>(rate / 50));
+     bool cue_playing = false;
+     while (true) {
++        // Sample after every branch, including decoder/resampler/I2S failures.
++        // Previously active TTS never updated play_stack until task exit.
++        struct StackSample {
++            AudioSession& session;
++            bool tts = false;
++            ~StackSample() { session.RecordPlaybackStack(tts); }
++        } stack_sample{*this};
+         // An arriving alarm requests stop and waits for the local clip task
+         // to release I2S before rendering its first chime frame.
+         if (recorder_mode_.load() != audio::RecorderMode::Idle) {
+@@ -1011,6 +1034,7 @@ void AudioSession::PlaybackLoop() {
+                                  !playback_open_.load() && !self_test_active_.load();
+         const bool received = xQueueReceive(rx_queue_, &packet,
+             (cue_allowed || cue_playing) ? 0 : pdMS_TO_TICKS(20)) == pdTRUE;
++        stack_sample.tts = received;
+         if (cue_playing && (received || !cue_allowed)) {
+             chime.FadeOut(cue.data(),cue.size(),rate);
+             if (GetHAL().WriteSpk(cue.data(),cue.size()) < 0) ++reminder_errors_;
+@@ -1026,7 +1050,6 @@ void AudioSession::PlaybackLoop() {
+             } else ++reminder_frames_;
+             cue_playing = true;
+             reminder_playing_.store(true);
+-            playback_stack_free_.store(uxTaskGetStackHighWaterMark(nullptr));
+             continue;
+         }
+         if (!received) {
+@@ -1097,7 +1120,7 @@ void AudioSession::PlaybackLoop() {
+         packets_decoded_.fetch_add(1);
+     }
+ 
+-    playback_stack_free_.store(uxTaskGetStackHighWaterMark(nullptr));
++    RecordPlaybackStack(false);
+     ESP_LOGI(kTag, "playback task exit, decoder released");
+ }
+ 
+diff --git a/main/xiaozhi/xiaozhi_audio.h b/main/xiaozhi/xiaozhi_audio.h
+index 2a1b04710cfb1fa0a862ec8e5d66231e7cd5e33c..a729cf05f96f938a67194a6adeb4b12e0b7d4c55 100644
+--- a/main/xiaozhi/xiaozhi_audio.h
++++ b/main/xiaozhi/xiaozhi_audio.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "audio/recorder_state.h"
++#include "audio/stack_watermark.h"
+ 
+ #include <atomic>
+ #include <cstddef>
+@@ -48,6 +49,11 @@ struct AudioSessionStats {
+     int protocol_version = 1;
+     uint32_t capture_stack_free = 0;
+     uint32_t playback_stack_free = 0;
++    // Task-lifetime low-water marks observed after TTS processing, not an
++    // isolated measurement of Opus. A zero sample count means unmeasured.
++    uint32_t playback_tts_stack_free = 0, playback_tts_stack_samples = 0;
++    uint32_t playback_create_failures = 0, playback_stack_bytes = 0;
++    uint32_t internal_largest_free = 0;
+     uint32_t internal_heap_free = 0;
+     uint32_t psram_free = 0;
+     bool capturing = false;
+@@ -150,7 +156,7 @@ public:
+ 
+     // Hardware bring-up path: capture and encode real microphone frames, then
+     // synthesise a tone through the same encoder/decoder pair and play it.
+-    // Runs on a dedicated 24 KiB stack task and refuses to start while a
++    // Runs on a dedicated 48 KiB internal stack task and refuses to start while a
+     // session window is active.
+     bool SelfTest(std::string* detail);
+     // Exercises the exact server downlink path locally: a tone is encoded at
+@@ -182,6 +188,7 @@ private:
+     void CaptureLoop();
+     void RecorderLoop();
+     void PlaybackLoop();
++    void RecordPlaybackStack(bool tts);
+     bool SelfTestBody(std::string* detail);
+     bool DownlinkLoopTestBody(std::string* detail);
+     bool RunAudioTestTask(bool downlink_loop, std::string* detail);
+@@ -235,7 +242,10 @@ private:
+     std::atomic<uint32_t> gate_opens_{0};
+     std::atomic<int> input_peak_{0};
+     std::atomic<uint32_t> capture_stack_free_{0};
+-    std::atomic<uint32_t> playback_stack_free_{0};
++    audio::StackWatermark playback_stack_;
++    audio::StackWatermark playback_tts_stack_;
++    std::atomic<uint32_t> playback_tts_stack_samples_{0};
++    std::atomic<uint32_t> playback_create_failures_{0};
+ 
+     TaskHandle_t capture_task_ = nullptr;
+     TaskHandle_t playback_task_ = nullptr;
