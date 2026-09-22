@@ -1,0 +1,66 @@
+name: Audio memory validation
+on:
+  push:
+    branches: [codex/fix-audio-ram]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: audio-memory-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare source-only inspection bundle
+        shell: python
+        run: |
+          from pathlib import Path
+          import zipfile
+          with zipfile.ZipFile('audio-sources.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for folder in ('main','tools','docs','components','.github'):
+              for p in Path(folder).rglob('*'):
+                if not p.is_file() or p.suffix not in ('.cc','.c','.h','.hpp','.py','.md','.txt','.yml','.inc'):
+                  continue
+                if p.name == 'ai_ui_assets.c' or p.stat().st_size > 400000:
+                  continue
+                z.write(p,p.as_posix())
+            for name in ('AGENTS.md','CMakeLists.txt','sdkconfig','sdkconfig.defaults','dependencies.lock'):
+              z.write(name,name)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-sources
+          path: audio-sources.zip
+          retention-days: 3
+  baseline:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 57df42054fd78934f777a014f0c45bdd25440167
+          persist-credentials: false
+      - name: Build unmodified failing baseline
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          set -o pipefail
+          idf.py build 2>&1 | tee baseline-build.log
+          idf.py size --format json > baseline-size.json
+          xtensa-esp32s3-elf-nm -S --size-sort build/metalio-hw-test.elf > baseline-symbols.txt
+          xtensa-esp32s3-elf-size -A build/metalio-hw-test.elf > baseline-sections.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audio-baseline
+          path: |
+            baseline-*.log
+            baseline-*.json
+            baseline-*.txt
+            build/delivery_manifest.json
+          retention-days: 7
