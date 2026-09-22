@@ -13,5 +13,6 @@ with tempfile.TemporaryDirectory(prefix='whiteai-mono-') as folder:
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-Wall','-Wextra','-Werror',
        '-fsanitize=address,undefined','-fno-omit-frame-pointer','-pthread',
        '-I',str(ROOT/'tools/tests/mono_stubs'),'-I',str(ROOT/'main'),'-I',str(cjson),
+       *(['-DCONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY=1'] if os.environ.get('WHITEAI_TEST_BLE') == '1' else []),
        '-DWHITEAI_BOOKS_PATH="'+str(p/'books')+'/"',*[str(ROOT/f) for f in files],str(p/'cjson.o'),'-o',str(p/'test')],check=True)
     subprocess.run([str(p/'test'),str(p/'books')],check=True)

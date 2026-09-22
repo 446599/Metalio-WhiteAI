@@ -43,10 +43,18 @@ EXERCISE = r'''
     assert(display.HandleQuickTap(80,490));assert(!device::preview_quick.ring);
     assert(display.HandleQuickTap(280,490));assert(!device::preview_quick.vibration);save("controls-silent");
     assert(display.HandleQuickPull(240,600,242,400,600));assert(!display.quick_controls_open_);
-    assert(display.HandleQuickTap(240,24));assert(display.HandleQuickTap(100,390));save("bluetooth-idle");
+    assert(display.HandleQuickTap(240,24));assert(display.HandleQuickTap(100,390));
+#if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
+    save("bluetooth-idle");
     assert(display.HandleQuickTap(100,630));assert(device::preview_quick.ble_busy);save("bluetooth-scanning");
     device::preview_quick.nearby={{"BLE test sensor","AA:BB:CC:DD:EE:FF",-45},{"中文蓝牙设备名称很长时不会溢出屏幕","01:23:45:67:89:AB",-63}};
     device::preview_quick.ble_busy=false;save("bluetooth-results");
+#else
+    assert(!display.quick_bluetooth_ && !device::preview_quick.ble_busy);
+    // The old scan hit target cannot create a scanner through an invisible key.
+    assert(display.HandleQuickTap(100,630));assert(!device::preview_quick.ble_busy);
+    save("controls-audio-priority");
+#endif
     assert(display.HandleQuickKey(RawDisplay::HardwareKey::Home));assert(!display.quick_controls_open_);
     display.product_page_=RawDisplay::ProductPage::NoteCompose;display.OpenEditorLocked(RawDisplay::EditTarget::NoteBody);
     assert(display.editor_.Insert("你好"));save("keyboard-new-backspace");

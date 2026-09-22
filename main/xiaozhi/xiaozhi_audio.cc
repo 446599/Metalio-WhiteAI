@@ -325,7 +325,7 @@ AudioSession& AudioSession::GetInstance() {
 AudioSession::AudioSession() {
     EnsureQueue();
     // The capture task already stays resident after the first conversation.
-    // Reserve its contiguous 40 KiB before TLS and ringtone playback fragment
+    // Reserve its contiguous 28 KiB before TLS and ringtone playback fragment
     // internal RAM. It stays idle: no microphone or encoder is opened here.
     (void)EnsureCaptureTask();
 }
@@ -468,6 +468,7 @@ bool AudioSession::EnsurePlaybackTask() {
             if (CreateAudioTask(PlaybackTaskEntry, "xz_playback", kPlaybackStackBytes, this,
                                 kAudioTaskPriority, &playback_task_) != pdPASS) {
                 playback_task_ = nullptr;
+                playback_create_failures_.fetch_add(1);
                 ESP_LOGE(kTag,
                          "playback task creation failed, internal free=%u largest=%u psram free=%u",
                          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -588,7 +589,12 @@ AudioSessionStats AudioSession::Stats() const {
     stats.output_rate = OutputRate();
     stats.frame_duration_ms = TargetFrameMs();
     stats.capture_stack_free = capture_stack_free_.load();
-    stats.playback_stack_free = playback_stack_free_.load();
+    stats.playback_stack_free = playback_stack_.FreeBytes();
+    stats.playback_tts_stack_samples = playback_tts_stack_samples_.load();
+    stats.playback_tts_stack_free = playback_tts_stack_.FreeBytes();
+    stats.playback_create_failures = playback_create_failures_.load();
+    stats.playback_stack_bytes = kPlaybackStackBytes;
+    stats.internal_largest_free = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     stats.internal_heap_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     stats.psram_free = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     stats.capturing = capture_requested_.load();
@@ -992,6 +998,16 @@ void AudioSession::PlaybackTaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
+void AudioSession::RecordPlaybackStack(bool tts) {
+    // ESP-IDF reports bytes, unlike upstream FreeRTOS's word-based API.
+    const uint32_t free_bytes = uxTaskGetStackHighWaterMark(nullptr);
+    playback_stack_.Observe(free_bytes);
+    if (tts) {
+        playback_tts_stack_.Observe(free_bytes);
+        playback_tts_stack_samples_.fetch_add(1);
+    }
+}
+
 void AudioSession::PlaybackLoop() {
     ESP_LOGI(kTag, "playback task start");
     Packet packet;
@@ -1001,6 +1017,13 @@ void AudioSession::PlaybackLoop() {
     std::vector<int16_t> cue(static_cast<size_t>(rate / 50));
     bool cue_playing = false;
     while (true) {
+        // Sample after every branch, including decoder/resampler/I2S failures.
+        // Previously active TTS never updated play_stack until task exit.
+        struct StackSample {
+            AudioSession& session;
+            bool tts = false;
+            ~StackSample() { session.RecordPlaybackStack(tts); }
+        } stack_sample{*this};
         // An arriving alarm requests stop and waits for the local clip task
         // to release I2S before rendering its first chime frame.
         if (recorder_mode_.load() != audio::RecorderMode::Idle) {
@@ -1011,6 +1034,7 @@ void AudioSession::PlaybackLoop() {
                                  !playback_open_.load() && !self_test_active_.load();
         const bool received = xQueueReceive(rx_queue_, &packet,
             (cue_allowed || cue_playing) ? 0 : pdMS_TO_TICKS(20)) == pdTRUE;
+        stack_sample.tts = received;
         if (cue_playing && (received || !cue_allowed)) {
             chime.FadeOut(cue.data(),cue.size(),rate);
             if (GetHAL().WriteSpk(cue.data(),cue.size()) < 0) ++reminder_errors_;
@@ -1026,7 +1050,6 @@ void AudioSession::PlaybackLoop() {
             } else ++reminder_frames_;
             cue_playing = true;
             reminder_playing_.store(true);
-            playback_stack_free_.store(uxTaskGetStackHighWaterMark(nullptr));
             continue;
         }
         if (!received) {
@@ -1097,7 +1120,7 @@ void AudioSession::PlaybackLoop() {
         packets_decoded_.fetch_add(1);
     }
 
-    playback_stack_free_.store(uxTaskGetStackHighWaterMark(nullptr));
+    RecordPlaybackStack(false);
     ESP_LOGI(kTag, "playback task exit, decoder released");
 }
 

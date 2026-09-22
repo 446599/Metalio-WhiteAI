@@ -1,5 +1,6 @@
 #pragma once
 #include "audio/recorder_state.h"
+#include "audio/stack_watermark.h"
 
 #include <atomic>
 #include <cstddef>
@@ -48,6 +49,11 @@ struct AudioSessionStats {
     int protocol_version = 1;
     uint32_t capture_stack_free = 0;
     uint32_t playback_stack_free = 0;
+    // Task-lifetime low-water marks observed after TTS processing, not an
+    // isolated measurement of Opus. A zero sample count means unmeasured.
+    uint32_t playback_tts_stack_free = 0, playback_tts_stack_samples = 0;
+    uint32_t playback_create_failures = 0, playback_stack_bytes = 0;
+    uint32_t internal_largest_free = 0;
     uint32_t internal_heap_free = 0;
     uint32_t psram_free = 0;
     bool capturing = false;
@@ -150,7 +156,7 @@ public:
 
     // Hardware bring-up path: capture and encode real microphone frames, then
     // synthesise a tone through the same encoder/decoder pair and play it.
-    // Runs on a dedicated 24 KiB stack task and refuses to start while a
+    // Runs on a dedicated 48 KiB internal stack task and refuses to start while a
     // session window is active.
     bool SelfTest(std::string* detail);
     // Exercises the exact server downlink path locally: a tone is encoded at
@@ -182,6 +188,7 @@ private:
     void CaptureLoop();
     void RecorderLoop();
     void PlaybackLoop();
+    void RecordPlaybackStack(bool tts);
     bool SelfTestBody(std::string* detail);
     bool DownlinkLoopTestBody(std::string* detail);
     bool RunAudioTestTask(bool downlink_loop, std::string* detail);
@@ -235,7 +242,10 @@ private:
     std::atomic<uint32_t> gate_opens_{0};
     std::atomic<int> input_peak_{0};
     std::atomic<uint32_t> capture_stack_free_{0};
-    std::atomic<uint32_t> playback_stack_free_{0};
+    audio::StackWatermark playback_stack_;
+    audio::StackWatermark playback_tts_stack_;
+    std::atomic<uint32_t> playback_tts_stack_samples_{0};
+    std::atomic<uint32_t> playback_create_failures_{0};
 
     TaskHandle_t capture_task_ = nullptr;
     TaskHandle_t playback_task_ = nullptr;

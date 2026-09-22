@@ -57,7 +57,7 @@ bool RawDisplay::HandleQuickTap(int x,int y) {
         else if(hit(32,280,416,64)) {
             if(form_active_.load()) busy_form=true;
             else {quick_controls_open_.store(false);product_page_=ProductPage::WifiList;wifi_page_=0;wifi_switch_confirm_=false;navigation_index_=0;form_message_.clear();action=Action::Network;}
-        } else if(hit(32,360,416,64)){quick_bluetooth_=true;quick_ble_page_=0;}
+        } else if(device::kBleDiscoveryEnabled && hit(32,360,416,64)){quick_bluetooth_=true;quick_ble_page_=0;}
         else if(hit(32,456,200,64)){ring=!ring;action=Action::Ring;}
         else if(hit(248,456,200,64)){vibration=!vibration;action=Action::Vibration;}
         if(action!=Action::Close){DrawHomeScreenLocked();FlushLocked();}
@@ -104,7 +104,12 @@ void RawDisplay::DrawProductQuickControlsLocked() {
         if(fill) FillRect(100,212,fill,16,true);
         button(32,280,416,64,"");DrawProductLabelLocked(48,288,384,"网络 · 点击设置",ui_font_small);
         DrawProductLabelLocked(48,316,384,state.network.c_str(),ui_font_small);
-        button(32,360,416,64,"蓝牙 · 扫描附近 BLE 设备");
+        if(device::kBleDiscoveryEnabled) button(32,360,416,64,"蓝牙 · 扫描附近 BLE 设备");
+        else {
+            // Informational text only: no border, scan button or hidden hit area.
+            DrawProductLabelLocked(48,360,384,"蓝牙音频保持原模式",ui_font_small);
+            DrawProductLabelLocked(48,392,384,"BLE 发现已停用，优先保障语音",ui_font_small);
+        }
         DrawText(32,428,"闹钟与日程的提醒方式",ui_font_small);
         button(32,456,200,64,state.ring ? "铃声 · 开" : "铃声 · 关");
         button(248,456,200,64,state.vibration ? "震动 · 开" : "震动 · 关");

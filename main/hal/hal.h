@@ -98,7 +98,8 @@ public:
     bool IsBtModeReady() const;
     // 发 AT 并收集应答；须在后台任务调用。
     bool BtSendCollect(const char* cmd, std::string& out, uint32_t timeout_ms = 2000);
-    // ESP NimBLE 扫描周边 BLE；须在后台任务调用。结束后 deinit 释放。
+    // Product returns unavailable without linking NimBLE. Experimental BLE
+    // discovery must be selected at build time; call only on a worker task.
     bool BleScan(std::vector<HalBtDevice>& out, std::string& detail, uint32_t timeout_ms = 8000,
                  const std::function<bool()>& cancelled = {});
 

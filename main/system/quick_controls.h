@@ -1,4 +1,5 @@
 #pragma once
+#include "build_features.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -17,7 +18,8 @@ struct QuickSnapshot {
     std::vector<NearbyDevice> nearby;
 };
 // Short settings work executes outside the framebuffer lock on the event task.
-// The BLE scan gets one temporary worker, not another permanent internal stack.
+// BLE discovery is omitted from the product build: even an idle linked
+// controller costs IRAM. Only the explicitly experimental build has a worker.
 class QuickControls {
 public:
     static QuickControls& Instance();
