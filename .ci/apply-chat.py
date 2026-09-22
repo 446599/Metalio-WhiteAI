@@ -5,7 +5,8 @@ assert hashlib.sha256(raw).hexdigest()=='3b65ce1f735f8017fc7e017cba45b1b6c20294a
 patch=lzma.decompress(raw)
 subprocess.run(['git','apply','--check','-'],input=patch,check=True)
 subprocess.run(['git','apply','-'],input=patch,check=True)
-if Path('.ci/chat-fixes.py').exists(): subprocess.run([sys.executable,'.ci/chat-fixes.py'],check=True)
+for fixer in ('.ci/chat-fixes.py','.ci/chat-build-fix.py'):
+ if Path(fixer).exists(): subprocess.run([sys.executable,fixer],check=True)
 subprocess.run([sys.executable,'tools/build_ui_icons.py'],check=True)
 subprocess.run(['git','add','main','tools','docs','assets'],check=True)
 subprocess.run(['git','diff','--cached','--check'],check=True)
