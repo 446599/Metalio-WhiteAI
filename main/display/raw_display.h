@@ -36,6 +36,8 @@ public:
     void ShowNotification(const char* notification, int duration_ms = 3000) override;
     void SetStatus(const char* status) override;
     void SetPowerSaveMode(bool on) override;
+    void SetLockScreen(bool on,const std::vector<uint8_t>& wallpaper);
+    bool HasUnsavedInput()const{return form_active_.load();}
 
     void RegisterTouchVirtualKeys(const void*, size_t, void (*)(const char*, int, void*), void* = nullptr) {}
     void ShowScreenTestPattern();
@@ -68,6 +70,7 @@ protected:
     void Unlock() override;
 
 private:
+    std::atomic<bool> lock_screen_{false};
     enum class ProductPage : uint8_t {
         Home,
         AiResult,

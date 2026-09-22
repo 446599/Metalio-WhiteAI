@@ -57,3 +57,6 @@ class AudioSession{public:
 };
 }
 namespace reminders{class Service{public:bool active=false;static Service& Instance(){static Service s;return s;}bool IsActive()const{return active;}};}
+
+inline int pdMS_TO_TICKS(int n){return n;}
+inline void vTaskDelay(int){}

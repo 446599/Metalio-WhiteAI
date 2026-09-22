@@ -52,7 +52,7 @@ FIELDS = r'''
     int wifi_page_=0;
     bool wifi_manual_=false,wifi_switch_confirm_=false;
     uint32_t last_wifi_revision_=0,last_writer_revision_=0,note_save_operation_=0;
-    void DrawHomeScreenLocked(){DrawProductScreenLocked();}
+    void DrawHomeScreenLocked(){if(!lock_screen_.load())DrawProductScreenLocked();}
     void FlushLocked(){}
     void UpdateStatusBar(bool){DrawProductScreenLocked();}
     void ShowNotification(const char* msg,int){std::snprintf(notification_text_,sizeof(notification_text_),"%s",msg);}

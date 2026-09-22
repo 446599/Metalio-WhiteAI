@@ -1,3 +1,4 @@
+#include "power/activity.h"
 #include "raw_display.h"
 #include "font/raw_font.h"
 #include "font/text_layout.h"
@@ -35,6 +36,7 @@ RawDisplay::DeviceSnapshot RawDisplay::SystemSnapshot() {
 }
 
 bool RawDisplay::OpenSystemApp(const std::string& app,const std::string& date) {
+    if(power::Locked())return false;
     struct Entry {const char* name;ProductPage page;};
     static constexpr Entry entries[]={
         {"home",ProductPage::Home},{"alarm",ProductPage::Alarm},{"calendar",ProductPage::TodayList},

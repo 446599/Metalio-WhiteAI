@@ -57,6 +57,26 @@ void WifiStation::AddAuth(const std::string &&ssid, const std::string &&password
     ssid_manager.AddSsid(ssid, password);
 }
 
+bool WifiStation::SuspendForSleep() {
+    std::unique_lock<std::mutex> operation(operation_mutex_,std::try_to_lock);
+    if(!operation || SetupBusy())return false;
+    std::lock_guard<std::recursive_mutex> state(state_mutex_);
+    if(!started_ || sleeping_)return true;
+    sleeping_.store(true);if(timer_handle_)esp_timer_stop(timer_handle_);
+    (void)esp_wifi_scan_stop();
+    const auto error=esp_wifi_stop();
+    if(error!=ESP_OK){sleeping_.store(false);return false;}
+    xEventGroupClearBits(event_group_,WIFI_EVENT_CONNECTED | WIFI_EVENT_SCAN_LIST_DONE);
+    connect_queue_.clear();ip_address_.clear();return true;
+}
+bool WifiStation::ResumeFromSleep() {
+    std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+    if(!sleeping_)return true;
+    sleeping_.store(false);
+    const auto error=esp_wifi_start();
+    if(error!=ESP_OK){sleeping_.store(true);return false;}
+    return true; // STA_START handles reconnect; no user credentials changed.
+}
 void WifiStation::Stop() {
     if (timer_handle_ != nullptr) {
         esp_timer_stop(timer_handle_);
@@ -86,7 +106,7 @@ void WifiStation::Stop() {
         station_netif_ = nullptr;
     }
 
-    started_ = false;
+    started_ = false;sleeping_.store(false);
     // Clear event group bits to prevent WaitForConnected from returning prematurely on restart
     xEventGroupClearBits(event_group_, WIFI_EVENT_CONNECTED | WIFI_EVENT_SCAN_LIST_DONE);
 }
@@ -105,7 +125,7 @@ void WifiStation::OnConnected(std::function<void(const std::string& ssid)> on_co
 
 void WifiStation::Start() {
     std::lock_guard<std::recursive_mutex> state_lock(state_mutex_);
-    if (started_) {
+    if (started_ || sleeping_) {
         return;
     }
 
@@ -142,7 +162,7 @@ void WifiStation::Start() {
         .callback = [](void* arg) {
             auto* self = static_cast<WifiStation*>(arg);
             std::lock_guard<std::recursive_mutex> lock(self->state_mutex_);
-            if (!self->SetupBusy()) esp_wifi_scan_start(nullptr, false);
+            if (!self->sleeping_.load() && !self->SetupBusy()) esp_wifi_scan_start(nullptr, false);
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -161,7 +181,7 @@ bool WifiStation::WaitForConnected(int timeout_ms) {
 bool WifiStation::ScanForList(std::vector<WifiScanAp>& out, int timeout_ms) {
     out.clear();
     std::unique_lock<std::mutex> operation_lock(operation_mutex_, std::try_to_lock);
-    if (!operation_lock || manual_setup_.load()) return false;
+    if (!operation_lock || manual_setup_.load() || sleeping_.load()) return false;
     std::unique_lock<std::recursive_mutex> state_lock(state_mutex_);
     if (timer_handle_ != nullptr) {
         esp_timer_stop(timer_handle_);
@@ -205,7 +225,7 @@ bool WifiStation::ScanForList(std::vector<WifiScanAp>& out, int timeout_ms) {
 
 void WifiStation::StartAutoConnectScan() {
     std::lock_guard<std::recursive_mutex> state_lock(state_mutex_);
-    if (SetupBusy()) return;
+    if (SetupBusy() || sleeping_.load()) return;
     if (!started_) {
         Start();
         return;
@@ -353,13 +373,18 @@ bool WifiStation::IsConnected() {
 }
 
 void WifiStation::SetPowerSaveMode(bool enabled) {
-    ESP_ERROR_CHECK(esp_wifi_set_ps(enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE));
+    if(started_ && !sleeping_) (void)esp_wifi_set_ps(enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
 }
 
 // Static event handler functions
 void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     auto* this_ = static_cast<WifiStation*>(arg);
     std::lock_guard<std::recursive_mutex> state_lock(this_->state_mutex_);
+    if(this_->sleeping_.load()){
+        if(event_id==WIFI_EVENT_STA_DISCONNECTED)xEventGroupClearBits(this_->event_group_,WIFI_EVENT_CONNECTED);
+        if(event_id==WIFI_EVENT_SCAN_DONE)esp_wifi_clear_ap_list();
+        return;
+    }
     if (event_id == WIFI_EVENT_STA_START) {
         if (this_->manual_setup_.load()) return;
         // listing_scan_：仍发起扫描，但 HandleScanResult 走列表路径而非自动连网
@@ -407,6 +432,7 @@ void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t
     auto* this_ = static_cast<WifiStation*>(arg);
     auto* event = static_cast<ip_event_got_ip_t*>(event_data);
     std::lock_guard<std::recursive_mutex> state_lock(this_->state_mutex_);
+    if(this_->sleeping_.load())return;
     wifi_ap_record_t ap{};
     if(esp_wifi_sta_get_ap_info(&ap)!=ESP_OK || event->ip_info.ip.addr==0 ||
        this_->ssid_!=std::string(reinterpret_cast<char*>(ap.ssid),strnlen(reinterpret_cast<char*>(ap.ssid),32))) return;
@@ -431,7 +457,7 @@ bool WifiStation::ConnectForSetup(const std::string& ssid, const std::string& pa
     if (!operation_lock || ssid.empty() || ssid.size()>32 || password.size()>64) return false;
     {
         std::lock_guard<std::recursive_mutex> lock(state_mutex_);
-        if (SetupBusy()) return false;
+        if (SetupBusy() || sleeping_.load()) return false;
         manual_setup_.store(true);
         manual_attempting_.store(false);
         Start();

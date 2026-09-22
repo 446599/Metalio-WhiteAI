@@ -46,6 +46,7 @@ public:
 
     // ---- 音频（BT I2S codec）----
     bool EnsureAudioStarted();
+    bool SuspendAudioForSleep(bool suspend);
     void SetVolume(int volume);
     int GetVolume();
     int AudioInputSampleRate() const;

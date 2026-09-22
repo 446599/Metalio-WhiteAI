@@ -47,20 +47,20 @@ jobs:
           path: managed_components/espressif__cjson/cJSON
           persist-credentials: false
       - run: python3 -m pip install Pillow
-      - name: Chat, icons, audio and all product regressions
+      - name: Sleep, connection, chat and all product regressions
         run: |
           mkdir -p validation
           failed=0
-          for test in tools/check_chat_history.py tools/check_ui_icon_sources.py tools/check_audio_playback.py tools/check_mono_controls.py tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
+          for test in tools/check_sleep_contract.py tools/check_transport_health.py tools/check_chat_history.py tools/check_ui_icon_sources.py tools/check_audio_playback.py tools/check_mono_controls.py tools/check_input_network.py tools/check_ssid_store.py tools/check_ui_contract.py tools/check_ai_contract.py tools/check_dashboard_contract.py tools/check_reminders_contract.py tools/check_system_tools.py tools/check_memory_contract.py tools/check_input_transport.py tools/check_volume_callbacks.py tools/check_serial_write.py tools/check_recorder.py tools/check_refresh_policy.py tools/check_reminder_chime.py; do
             python3 "$test" > "validation/$(basename "$test").log" 2>&1 || failed=1
             tail -n 20 "validation/$(basename "$test").log"
           done
           exit "$failed"
-      - name: Clang history and bookmark portability regressions
+      - name: Clang history, bookmark and sleep portability regressions
         run: |
           mkdir -p validation
           failed=0
-          for test in tools/check_chat_history.py tools/check_mono_controls.py; do
+          for test in tools/check_chat_history.py tools/check_mono_controls.py tools/check_sleep_contract.py; do
             CXX=clang++ python3 "$test" > "validation/clang-$(basename "$test").log" 2>&1 || failed=1
             tail -n 20 "validation/clang-$(basename "$test").log"
           done

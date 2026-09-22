@@ -1,3 +1,4 @@
+#include "power/sleep_service.h"
 #include "dual_network_board.h"
 #include "application.h"
 #include "bt_audio_codec.h"
@@ -436,12 +437,15 @@ private:
             if (auto* raw = RawDisplay::Instance()) (void)raw->HandleAiKey(false);
         });
         power_button_.OnPressDown([]() {
+            power::SleepService::Instance().PowerKeyDown();
             s_power_held = true;
             s_power_down_us = esp_timer_get_time();
             ESP_LOGI(TAG, "按键按下: POWER (GPIO%d)", static_cast<int>(POWER_BUTTON_GPIO));
         });
         power_button_.OnPressUp([]() { s_power_held = false; });
+        power_button_.OnClick([](){power::SleepService::Instance().PowerKeyClick();});
         power_button_.OnLongPress([]() {
+            power::SleepService::Instance().Wake();
             ESP_LOGI(TAG, "按键长按 %ums: POWER 刷关机画并断电 (GPIO%d)",
                      static_cast<unsigned>(kPowerLongPressMs),
                      static_cast<int>(POWER_BUTTON_GPIO));
@@ -460,6 +464,7 @@ private:
             // reset the board; defer the complete volume transaction to the
             // application's 8 KiB event task.
             (void)Application::GetInstance().ScheduleUi([this]() {
+                if(power::Locked())return;
                 auto* codec = GetAudioCodec();
                 if (codec == nullptr) return;
                 int volume = std::min(100, codec->output_volume() + 10);
@@ -471,6 +476,7 @@ private:
         });
         volume_up_button_->OnLongPress([this]() {
             (void)Application::GetInstance().ScheduleUi([this]() {
+                if(power::Locked())return;
                 if (auto* codec = GetAudioCodec()) codec->SetOutputVolume(100);
                 ESP_LOGI(TAG, "VOLUME_UP long: volume=100");
                 if (auto* display = GetDisplay()) display->ShowNotification(Lang::Strings::MAX_VOLUME);
@@ -479,6 +485,7 @@ private:
 
         volume_down_button_->OnClick([this]() {
             (void)Application::GetInstance().ScheduleUi([this]() {
+                if(power::Locked())return;
                 auto* codec = GetAudioCodec();
                 if (codec == nullptr) return;
                 int volume = std::max(0, codec->output_volume() - 10);
@@ -490,6 +497,7 @@ private:
         });
         volume_down_button_->OnLongPress([this]() {
             (void)Application::GetInstance().ScheduleUi([this]() {
+                if(power::Locked())return;
                 if (auto* codec = GetAudioCodec()) codec->SetOutputVolume(0);
                 ESP_LOGI(TAG, "VOLUME_DOWN long: volume=0 (muted)");
                 if (auto* display = GetDisplay()) display->ShowNotification(Lang::Strings::MUTED);
@@ -587,7 +595,8 @@ private:
 
                 while (true) {
                     vTaskDelay(pdMS_TO_TICKS(1000));
-
+                    if(power::Locked())continue;
+                    power::Activity activity;if(!activity)continue;
                     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
                     const uint64_t dt_us = now_us - prev_us;
                     int usage[kCoreCount] = {};

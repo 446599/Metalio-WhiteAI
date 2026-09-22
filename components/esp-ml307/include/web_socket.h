@@ -1,6 +1,7 @@
 #ifndef WEBSOCKET_H
 #define WEBSOCKET_H
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <map>
@@ -25,7 +26,11 @@ public:
     bool Connect(const char* uri);
     bool Send(const std::string& data);
     bool Send(const void* data, size_t len, bool binary = false, bool fin = true);
-    void Ping();
+    bool Ping();
+    struct Health {uint32_t sent, pong, failed, received; uint16_t close_code;};
+    Health GetHealth() const {return {pings_.load(),pongs_.load(),ping_failed_.load(),rx_frames_.load(),close_code_.load()};}
+    // Owner task drains server Ping replies, never a detached task holding this.
+    bool ServiceControl();
     void Close();
 
     void OnConnected(std::function<void()> callback);
@@ -48,7 +53,12 @@ private:
     bool rx_fragmented_ = false;
     bool rx_binary_ = false;
     bool handshake_completed_ = false;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
+    std::atomic<uint32_t> pings_{0},pongs_{0},ping_failed_{0},rx_frames_{0};
+    std::atomic<uint16_t> close_code_{0};
+    std::mutex control_mutex_;
+    std::string pending_pong_;
+    bool pong_pending_=false;
 
     // Mutex for sending data and replying pong
     std::mutex send_mutex_;

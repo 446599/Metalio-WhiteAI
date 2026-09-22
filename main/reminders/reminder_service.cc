@@ -1,3 +1,4 @@
+#include "power/sleep_service.h"
 #include "reminder_service.h"
 #include "system/quick_controls.h"
 #include "application.h"
@@ -157,6 +158,7 @@ void Service::Run() {
     std::vector<uint32_t> active_ids;
     auto& audio = xiaozhi::AudioSession::GetInstance();
     while (true) {
+        power::Activity activity;if(!activity){vTaskDelay(pdMS_TO_TICKS(20));continue;}
         Action action;
         { std::lock_guard<std::mutex> lock(alert_mutex_); action = alert_action_; alert_action_ = Action::None; }
         if (action != Action::None) {
@@ -182,6 +184,12 @@ void Service::Run() {
         }
         const int64_t now_ms = esp_timer_get_time()/1000;
         if (!due.empty()) {
+            if(power::Locked()) {
+                power::SleepService::Instance().Wake();
+                activity.Release();
+                while(power::Locked())vTaskDelay(pdMS_TO_TICKS(20));
+                activity.Retry();while(!activity){vTaskDelay(pdMS_TO_TICKS(20));activity.Retry();}
+            }
             preferences.CancelBluetooth();
             for (const auto& item : due) {
                 if (std::find(active_ids.begin(),active_ids.end(),item.id) == active_ids.end()) active_ids.push_back(item.id);
@@ -232,7 +240,7 @@ void Service::Run() {
         }
         if (alert_dirty_) PublishAlert();
         Publish();
-        vTaskDelay(pdMS_TO_TICKS(200));
+        activity.Release();vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 }  // namespace reminders

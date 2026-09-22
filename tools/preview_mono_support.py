@@ -1,6 +1,8 @@
 """Host adapters for hardware; all new drawing and input methods are production code."""
 HEADERS = r'''
 #include "system/quick_controls.h"
+#include "power/sleep_service.h"
+namespace power { inline int toggles=0; SleepService& SleepService::Instance(){static SleepService s;return s;} void SleepService::Toggle(){assert(ui_lock_depth==0);++toggles;} }
 #include "reader/reader_service.h"
 #include "notes/conversation_note.h"
 #include "input/gesture.h"
@@ -27,23 +29,23 @@ bool Service::Turn(int direction){assert(ui_lock_depth==0);if(direction<0){if(pr
 }
 '''
 FIELDS = r'''
-    std::atomic_bool quick_controls_open_{false};
+    std::atomic_bool lock_screen_{false},quick_controls_open_{false};
     bool quick_bluetooth_=false;
     int quick_ble_page_=0,book_list_page_=0;
     uint32_t last_quick_revision_=0,last_reader_revision_=0;
     std::string selected_card_title_,selected_card_text_;
 '''
-METHODS = ["SelectCardSnapshotLocked","OpenConversationNote","SetQuickControls","HandleQuickPull","HandleQuickKey","HandleQuickTap","HandleReaderTap","HandleReaderKey"]
+METHODS = ["SelectCardSnapshotLocked","OpenConversationNote","SetLockScreen","SetQuickControls","HandleQuickPull","HandleQuickKey","HandleQuickTap","HandleReaderTap","HandleReaderKey"]
 EXERCISE = r'''
     display.ClearFormLocked();display.reminder_alert_.active=false;
     display.product_page_=RawDisplay::ProductPage::Home;
     assert(display.HandleQuickPull(240,12,246,140,500));assert(display.quick_controls_open_);save("controls-open");
     assert(display.HandleQuickTap(410,220));assert(device::preview_quick.volume==10);
     assert(display.HandleQuickTap(240,220));assert(device::preview_quick.volume==50);save("controls-volume");
-    assert(display.HandleQuickTap(80,490));assert(!device::preview_quick.ring);
-    assert(display.HandleQuickTap(280,490));assert(!device::preview_quick.vibration);save("controls-silent");
+    assert(display.HandleQuickTap(80,400));assert(!device::preview_quick.ring);
+    assert(display.HandleQuickTap(280,400));assert(!device::preview_quick.vibration);save("controls-silent");
     assert(display.HandleQuickPull(240,600,242,400,600));assert(!display.quick_controls_open_);
-    assert(display.HandleQuickTap(240,24));assert(display.HandleQuickTap(100,390));
+    assert(display.HandleQuickTap(240,24));assert(display.HandleQuickTap(100,560));
 #if defined(CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY) && CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY
     save("bluetooth-idle");
     assert(display.HandleQuickTap(100,630));assert(device::preview_quick.ble_busy);save("bluetooth-scanning");
@@ -70,4 +72,22 @@ EXERCISE = r'''
     assert(display.HandleQuickTap(200,20));display.reminder_alert_.active=true;save("controls-alarm-priority");assert(!display.quick_controls_open_);
     display.reminder_alert_.active=false;display.ClearFormLocked();
     std::puts("Mono UI PASS: real toolbar/reader/keyboard/AI archive routing; all mocked side effects outside display lock");
+'''
+
+EXERCISE += r'''
+    display.product_page_=RawDisplay::ProductPage::Home;
+    display.SetQuickControls(true);assert(display.HandleQuickTap(100,490));assert(power::toggles==1);assert(!display.quick_controls_open_);
+    display.product_page_=RawDisplay::ProductPage::NoteCompose;display.OpenEditorLocked(RawDisplay::EditTarget::NoteBody);
+    assert(display.editor_.Insert("保留的草稿"));display.password_reveal_=true;
+    power::Gate::Instance().locked.store(true);display.SetLockScreen(true,{});
+    assert(display.lock_screen_ && !display.password_reveal_);assert(display.editor_.Text()=="保留的草稿");
+    const auto lock_pixels=display.pixels;
+    save("lock-wallpaper-default");assert(display.pixels==lock_pixels);
+    display.UpdateStatusBar(true);assert(display.pixels==lock_pixels);
+    std::vector<uint8_t> wallpaper(48000,0);wallpaper[6000]=0x81;
+    display.SetLockScreen(true,wallpaper);assert(display.portrait_fb_[6000]==0x7e);save("lock-wallpaper-custom-fixture");assert(display.portrait_fb_[6000]==0x7e);
+    assert(display.HandleQuickTap(240,24));assert(!display.quick_controls_open_);
+    power::Gate::Instance().locked.store(false);display.SetLockScreen(false,{});
+    assert(!display.lock_screen_ && display.editor_.Text()=="保留的草稿");save("unlock-restores-draft");display.ClearFormLocked();
+    std::puts("Lock UI PASS: opaque mono wallpaper, PBM polarity, retained draft, hidden password, blocked controls");
 '''

@@ -1,3 +1,4 @@
+#include "power/activity.h"
 #include "note_writer.h"
 #include "note_service.h"
 #include "application.h"
@@ -23,6 +24,8 @@ uint32_t Writer::Save(const Note& draft) {
 }
 void Writer::Worker(void* arg) {
     {
+        power::Activity activity;
+        while(!activity){vTaskDelay(pdMS_TO_TICKS(20));activity.Retry();}
         std::unique_ptr<Job> job(static_cast<Job*>(arg));
         auto& store=DeviceStore();Note saved;std::string error;bool ok;
         const auto now=time(nullptr);const auto stamp=reminders::ValidClock(now) ? now : 0;

@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 body = function((ROOT/'components/esp-ml307/src/web_socket.cc').read_text(), 'WebSocket::OnTcpData')
 code = r'''
 #include <cassert>
+#include <atomic>
+#include <mutex>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -16,9 +19,14 @@ code = r'''
 #include <vector>
 #include "ui_work_queue.h"
 #define ESP_LOGE(...) ((void)0)
+#define ESP_LOGI(...) ((void)0)
+#define ESP_LOGW(...) ((void)0)
 void xEventGroupSetBits(int,int) {}
 class WebSocket {
 public:
+    std::atomic<uint32_t> rx_frames_{0},pongs_{0};
+    std::atomic<uint16_t> close_code_{0};
+    std::mutex control_mutex_;std::string pending_pong_;bool pong_pending_=false;
     std::string receive_buffer_;
     std::vector<char> current_message_;
     bool rx_fragmented_=false, rx_binary_=false, handshake_completed_=true, connected_=true;

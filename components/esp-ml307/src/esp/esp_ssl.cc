@@ -3,6 +3,8 @@
 #include <esp_crt_bundle.h>
 #include <cstring>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <cerrno>
 
 static const char *TAG = "EspSsl";
 
@@ -33,6 +35,7 @@ bool EspSsl::Connect(const std::string& host, int port) {
 
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.timeout_ms = 10000;
 
     int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
     if (ret != 1) {
@@ -54,12 +57,16 @@ bool EspSsl::Connect(const std::string& host, int port) {
     connected_ = true;
 
     xEventGroupClearBits(event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
-    xTaskCreate([](void* arg) {
+    if(xTaskCreate([](void* arg) {
         EspSsl* ssl = (EspSsl*)arg;
         ssl->ReceiveTask();
         xEventGroupSetBits(ssl->event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
         vTaskDelete(NULL);
-    }, "ssl_receive", 4096, this, 1, &receive_task_handle_);
+    }, "ssl_receive", 4096, this, 1, &receive_task_handle_)!=pdPASS) {
+        connected_=false;last_error_=ESP_ERR_NO_MEM;receive_task_handle_=nullptr;
+        esp_tls_conn_destroy(tls_client_);tls_client_=nullptr;
+        ESP_LOGE(TAG,"receive task allocation failed");return false;
+    }
     return true;
 }
 
@@ -68,17 +75,15 @@ void EspSsl::Disconnect() {
     
     // Close socket if it is open
     if (tls_client_ != nullptr) {
-        int sockfd;
-        ESP_ERROR_CHECK(esp_tls_get_conn_sockfd(tls_client_, &sockfd));
-        if (sockfd >= 0) {
-            close(sockfd);
+        int sockfd=-1;
+        if(esp_tls_get_conn_sockfd(tls_client_, &sockfd)==ESP_OK && sockfd>=0)
+            shutdown(sockfd,SHUT_RDWR);
+        // esp_tls_conn_destroy owns close(). A preliminary close could let a
+        // new HTTP socket reuse the fd and then be closed by TLS destruction.
+        if(receive_task_handle_) {
+            xEventGroupWaitBits(event_group_,ESP_SSL_EVENT_RECEIVE_TASK_EXIT,pdFALSE,pdFALSE,portMAX_DELAY);
+            receive_task_handle_=nullptr;
         }
-    
-        auto bits = xEventGroupWaitBits(event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
-        if (!(bits & ESP_SSL_EVENT_RECEIVE_TASK_EXIT)) {
-            ESP_LOGE(TAG, "Failed to wait for receive task exit");
-        }
-
         esp_tls_conn_destroy(tls_client_);
         tls_client_ = nullptr;
     }
@@ -97,11 +102,13 @@ int EspSsl::Send(const std::string& data) {
     size_t data_size = data.size();
     const char* data_ptr = data.data();
     
-    while (total_sent < data_size) {
+    const TickType_t began=xTaskGetTickCount();
+    while (connected_ && total_sent < data_size) {
         int ret = esp_tls_conn_write(tls_client_, data_ptr + total_sent, data_size - total_sent);
 
-        if (ret == ESP_TLS_ERR_SSL_WANT_WRITE) {
-            continue;
+        if (ret == ESP_TLS_ERR_SSL_WANT_WRITE || ret == ESP_TLS_ERR_SSL_WANT_READ) {
+            if(xTaskGetTickCount()-began>=pdMS_TO_TICKS(10000)){last_error_=ESP_ERR_TIMEOUT;return -1;}
+            vTaskDelay(pdMS_TO_TICKS(5));continue;
         }
 
         if (ret <= 0) {
@@ -112,7 +119,7 @@ int EspSsl::Send(const std::string& data) {
         total_sent += ret;
     }
     
-    return total_sent;
+    return total_sent==data_size ? static_cast<int>(total_sent) : -1;
 }
 
 void EspSsl::ReceiveTask() {
@@ -121,13 +128,14 @@ void EspSsl::ReceiveTask() {
         data.resize(1500);
         int ret = esp_tls_conn_read(tls_client_, data.data(), data.size());
 
-        if (ret == ESP_TLS_ERR_SSL_WANT_READ) {
-            continue;
+        if (ret == ESP_TLS_ERR_SSL_WANT_READ || ret == ESP_TLS_ERR_SSL_WANT_WRITE) {
+            vTaskDelay(pdMS_TO_TICKS(10));continue;
         }
 
         if (ret <= 0) {
             if (ret < 0) {
-                ESP_LOGE(TAG, "SSL receive failed: %d", ret);
+                last_error_=ret;
+                ESP_LOGE(TAG, "SSL receive failed: ret=%d errno=%d connected=%d",ret,errno,int(connected_));
             }
             connected_ = false;
             // 接收失败或连接断开时调用断连回调

@@ -6,6 +6,7 @@
 #include <driver/i2s_std.h>
 
 #include <vector>
+#include <atomic>
 #include <string>
 #include <functional>
 
@@ -27,6 +28,8 @@ public:
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
+    bool SuspendForSleep(bool suspend);
+    bool IsSleepSuspended()const{return sleep_suspended_.load();}
 
     inline bool duplex() const { return duplex_; }
     inline bool input_reference() const { return input_reference_; }
@@ -43,6 +46,8 @@ protected:
     i2s_chan_handle_t tx_handle_ = nullptr;
     i2s_chan_handle_t rx_handle_ = nullptr;
 
+    bool channels_started_=false;
+    std::atomic<bool> sleep_suspended_{false};
     bool duplex_ = false;
     bool input_reference_ = false;
     bool input_enabled_ = false;

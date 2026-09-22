@@ -26,6 +26,8 @@ set(SOURCES
             "system/quick_controls.cc"
             "display/quick_controls_view.cc"
             "system/boot_diag.cc"
+            "power/sleep_service.cc"
+            "display/lock_screen_view.cc"
             "notes/note_store.cc"
             "notes/note_service.cc"
             "reminders/reminder_store.cc"

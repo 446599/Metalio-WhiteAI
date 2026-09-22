@@ -193,7 +193,7 @@ int main() {
     cJSON* request = cJSON_Parse(sent.back().c_str());
     assert(request);
     assert(std::strcmp(cJSON_GetObjectItem(request,"state")->valuestring,"detect")==0);
-    assert(std::strcmp(cJSON_GetObjectItem(request,"text")->valuestring,"待办草稿")==0);
+    assert(std::strcmp(cJSON_GetObjectItem(request,"text")->valuestring,"待办草稿，请调用self.chat.get_task")==0);
     assert(std::strstr(cJSON_GetObjectItem(request,"text")->valuestring,"闪念")==nullptr);
     assert(!ChatTask::Instance().ReadAll());
     auto task=ChatTask::Instance().Read(0,0);
@@ -309,6 +309,20 @@ int main() {
     event(R"({"type":"alert","message":"服务拒绝了请求"})");
     assert(conversation.Snapshot().message=="服务拒绝了请求" && conversation.Snapshot().transcript=="你好，今天怎么安排？");
     assert(chat::captured_statuses.end()!=std::find(chat::captured_statuses.begin(),chat::captured_statuses.end(),"complete"));
+    // Idle TLS/normal cloud goodbye must leave the last answer actionable.
+    client.Abort();connected();conversation.Restore("完成的原文","完成的回答");
+    client.HandleDisconnect(client.transport_epoch_);
+    assert(conversation.Snapshot().state==TurnState::Done && conversation.Snapshot().answer=="完成的回答");
+    connected();event(R"({"type":"goodbye"})");
+    assert(conversation.Snapshot().state==TurnState::Done && conversation.Snapshot().transcript=="完成的原文");
+    connected();power::Gate::Instance().locked.store(true);
+    assert(!client.ListenStart() && !client.SubmitText("锁屏输入"));
+    power::Gate::Instance().locked.store(false);
+    assert(ChatTask::Instance().Begin("test",std::string(5000,'x')));
+    auto read1=ChatTask::Instance().Read(0,0);assert(read1.ok);
+    assert(!ChatTask::Instance().Read(read1.id,4999).ok);
+    auto stats=ChatTask::Instance().Stats();assert(stats.reads==2&&stats.failures==1&&stats.read==read1.next&&!ChatTask::Instance().ReadAll());
+    ChatTask::Instance().Cancel();
     // Full bounded strings never end inside a multibyte codepoint.
     conversation.Begin();
     std::string long_text;

@@ -1,3 +1,4 @@
+#include "power/sleep_service.h"
 #include "application.h"
 #include "notes/note_service.h"
 #include "system/boot_diag.h"
@@ -104,6 +105,7 @@ void Application::Start() {
         dashboard::DashboardService::GetInstance().Start();
         notes::Start();
         device::QuickControls::Instance().Start();
+        power::SleepService::Instance().Start();
         reminders::Service::Instance().Start();
         xiaozhi::Client::GetInstance().Start();
         boot_diag::Mark(boot_diag::Stage::kProvidersStarted);
@@ -130,11 +132,12 @@ void Application::MainEventLoop() {
             // A bounded batch keeps provider/status work from starvation.
             for (size_t i = 0; i < UiWorkQueue::kCapacity && ui_tasks_.Pop(task); ++i) task();
         }
-        if (bits & MAIN_EVENT_AI_FOCUS) {
+        if ((bits & MAIN_EVENT_AI_FOCUS) && !power::Locked()) {
             if (auto* raw = RawDisplay::Instance()) raw->ShowAiConversation();
         }
         if (bits & MAIN_EVENT_CLOCK_TICK) {
-            device::Control::Instance().Tick();
+            power::SleepService::Instance().Tick();
+            if(!power::Locked())device::Control::Instance().Tick();
             if (auto* display = Board::GetInstance().GetDisplay()) {
                 display->UpdateStatusBar(force_status_update_.exchange(false));
             }
