@@ -189,6 +189,20 @@ idf.py -p /dev/cu.usbmodemXXXXX flash
 会写 bootloader、分区表、otadata、应用与完整字库，**并重置 OTA 槽选择**。
 不包含 NVS，不会清空用户数据。
 
+### 在线烧录（不需要开发环境）
+
+网页烧录器已托管在 GitHub Pages，浏览器直接打开即可用：
+
+**https://446599.github.io/Metalio-WhiteAI/**
+
+用桌面版 Chrome 或 Edge 打开（macOS 不要用 Safari），连接设备后在**发布页下载的固件包**里
+选择对应的 `.bin`。网页通过 Web Serial 直接刷写，需要 HTTPS 或 localhost，
+Pages 默认提供 HTTPS。刷机库已随页面本地化，**不依赖 CDN**。
+
+> 网页会读取设备真实分区表并校验，**地址以设备读回结果为准**。
+> 它不包含任何固件，需要你先从
+> [Releases](https://github.com/446599/Metalio-WhiteAI/releases) 下载固件包。
+
 ### 已有设备更新（推荐）
 
 先确认设备分区表与本次构建一致：

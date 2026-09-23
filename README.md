@@ -15,6 +15,10 @@ the application target.
 | ESP-IDF | 6.0.1 verified (5.5.2+ intended) |
 | Application offset | `0x80000` |
 
+Browser flasher (GitHub Pages, no toolchain needed):
+**https://446599.github.io/Metalio-WhiteAI/** — pair it with the firmware
+binaries from [Releases](https://github.com/446599/Metalio-WhiteAI/releases).
+
 **The Chinese README is the maintained one**: [README_zh.md](README_zh.md)
 covers every product feature, build/flash steps and known limits.
 For adding features, see the [secondary development guide](docs/DEVELOPMENT.md)
