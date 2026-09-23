@@ -1,0 +1,93 @@
+diff --git a/web-flasher/README.md b/web-flasher/README.md
+index 426f637..e66e87d 100644
+--- a/web-flasher/README.md
++++ b/web-flasher/README.md
+@@ -87,7 +87,7 @@ USB 始终为模拟对象，不会请求或操作真实设备。浏览器禁止
+ 
+ ## GitHub / 静态部署
+ 
+-可把整个 `web-flasher/` 目录作为静态站点部署到 HTTPS 主机，无构建命令。当前提交只增加网页源码，**没有更改仓库可见性、启用 GitHub Pages 或发布公网网站**。GitHub Pages 部署时需由仓库所有者配置站点来源或 Actions；仅发布此静态目录，不要发布 SD 备份、NVS、凭据或私人资料。SDK Apache-2.0 许可来自 [Espressif esptool-js](https://github.com/espressif/esptool-js/tree/v0.7.0)。
++可把整个 `web-flasher/` 目录作为静态站点部署到 HTTPS 主机，无构建命令。仓库已有 `gh-pages` 站点，网页文件位于该分支根目录；发布修复需同时更新主分支 `web-flasher/` 和站点分支，不能只改固件源码。仅发布此静态目录，不要发布 SD 备份、NVS、凭据或私人资料。SDK Apache-2.0 许可来自 [Espressif esptool-js](https://github.com/espressif/esptool-js/tree/v0.7.0)。
+ 
+ 
+ ## 1.1.0：选中串口后无响应
+diff --git a/web-flasher/session.mjs b/web-flasher/session.mjs
+index 445946c..44424d8 100644
+--- a/web-flasher/session.mjs
++++ b/web-flasher/session.mjs
+@@ -56,7 +56,10 @@ export class FlashSession {
+         const { ESPLoader, Transport } = await stage('加载刷机库', this.timeouts.sdk, () => this.loadSdk());
+         this.lease = new SerialPortLease(port, { closeTimeout: this.timeouts.close, onStage: this.onStage });
+         this.transport = new Transport(this.lease, false);
+-        this.transport.setDeviceLostCallback?.(() => this.markLost(port));
++        const transport = this.transport;
++        transport.setDeviceLostCallback?.(() => {
++          if (this.transport === transport) this.markLost(port);
++        });
+         const info = port.getInfo?.() || {};
+         // Keep native USB-Serial/JTAG open rather than provoking a close/reopen
+         // and DTR/RTS transition just to change a USB line-coding baud value.
+diff --git a/web-flasher/tests/connection.test.mjs b/web-flasher/tests/connection.test.mjs
+index 344c5e1..762b1c0 100644
+--- a/web-flasher/tests/connection.test.mjs
++++ b/web-flasher/tests/connection.test.mjs
+@@ -118,3 +118,15 @@ test('actual SDK normal baud change may close and reopen within the same lease',
+   assert.equal(port.opens,2);assert.equal(port.closes,1);assert.equal(t.baudrate,460800);
+   await lease.dispose();assert.equal(port.closes,2);
+ });
++
++
++test('late device-lost callback from an old Transport cannot disconnect a new session on the same port',async()=>{
++  const mock=mockSdk(), callbacks=[];
++  mock.sdk.Transport.prototype.setDeviceLostCallback=function(callback){callbacks.push(callback);};
++  const s=new FlashSession(async()=>mock.sdk),port={};
++  await s.connect(port); await s.disconnect();
++  await s.connect(port); callbacks[0]();
++  assert.ok(s.device); assert.equal(s.lost,false);
++  callbacks[1](); assert.equal(s.device,null); assert.equal(s.lost,true);
++  await s.disconnect();
++});
+diff --git a/web-flasher/tests/sdk_browser_test.py b/web-flasher/tests/sdk_browser_test.py
+new file mode 100644
+index 0000000..cbef13f
+--- /dev/null
++++ b/web-flasher/tests/sdk_browser_test.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python3
++"""Load the pinned, self-hosted SDK under the actual page CSP; no USB access."""
++from functools import partial
++from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++import threading
++from playwright.sync_api import sync_playwright
++
++ROOT = Path(__file__).resolve().parents[1]
++class Quiet(SimpleHTTPRequestHandler):
++    def log_message(self, *_):
++        pass
++
++def main():
++    server = ThreadingHTTPServer(('127.0.0.1', 0), partial(Quiet, directory=str(ROOT)))
++    threading.Thread(target=server.serve_forever, daemon=True).start()
++    try:
++        with sync_playwright() as p:
++            browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
++            page = browser.new_page()
++            errors = []
++            page.on('pageerror', lambda e: errors.append(str(e)))
++            page.goto(f'http://127.0.0.1:{server.server_port}/')
++            result = page.evaluate("""async () => {
++                const {loadSdk} = await import('./sdk.mjs');
++                const sdk = await loadSdk();
++                return [typeof sdk.Transport, typeof sdk.ESPLoader];
++            }""")
++            assert result == ['function', 'function'], result
++            assert not errors, errors
++            print('Real Chromium + page CSP + local pinned SDK import: PASS (no USB attached)')
++            browser.close()
++    finally:
++        server.shutdown()
++        server.server_close()
++
++if __name__ == '__main__':
++    main()

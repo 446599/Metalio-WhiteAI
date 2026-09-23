@@ -1,10 +1,9 @@
 from pathlib import Path
-import base64, hashlib, subprocess, zlib
-payload = ''.join(Path(f'.ci/web-serial.{i}').read_text().strip() for i in range(4))
-patch = zlib.decompress(base64.b64decode(payload, validate=True))
-expected = 'fafe33fe02ab1790891aa6a40a02a978b703b181024ff7a0c2471a8d8b55ab1e'
+import hashlib, subprocess
+patch = Path('.ci/final-review.patch').read_bytes()
+expected = 'e760d1f7f1da54ddfa26d5264468130cd2fbf1ea50d8e7ee86f1fa1fb8c1e55f'
 if hashlib.sha256(patch).hexdigest() != expected:
     raise SystemExit('Source patch checksum mismatch')
 subprocess.run(['git','apply','--check','-'], input=patch, check=True)
 subprocess.run(['git','apply','-'], input=patch, check=True)
-print('Verified source patch:', expected)
+print('Verified incremental source patch:', expected)
