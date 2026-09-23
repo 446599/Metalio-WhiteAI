@@ -87,7 +87,7 @@ USB 始终为模拟对象，不会请求或操作真实设备。浏览器禁止�
 
 ## GitHub / 静态部署
 
-可把整个 `web-flasher/` 目录作为静态站点部署到 HTTPS 主机，无构建命令。当前提交只增加网页源码，**没有更改仓库可见性、启用 GitHub Pages 或发布公网网站**。GitHub Pages 部署时需由仓库所有者配置站点来源或 Actions；仅发布此静态目录，不要发布 SD 备份、NVS、凭据或私人资料。SDK Apache-2.0 许可来自 [Espressif esptool-js](https://github.com/espressif/esptool-js/tree/v0.7.0)。
+可把整个 `web-flasher/` 目录作为静态站点部署到 HTTPS 主机，无构建命令。仓库已有 `gh-pages` 站点，网页文件位于该分支根目录；发布修复需同时更新主分支 `web-flasher/` 和站点分支，不能只改固件源码。仅发布此静态目录，不要发布 SD 备份、NVS、凭据或私人资料。SDK Apache-2.0 许可来自 [Espressif esptool-js](https://github.com/espressif/esptool-js/tree/v0.7.0)。
 
 
 ## 1.1.0：选中串口后无响应

@@ -118,3 +118,15 @@ test('actual SDK normal baud change may close and reopen within the same lease',
   assert.equal(port.opens,2);assert.equal(port.closes,1);assert.equal(t.baudrate,460800);
   await lease.dispose();assert.equal(port.closes,2);
 });
+
+
+test('late device-lost callback from an old Transport cannot disconnect a new session on the same port',async()=>{
+  const mock=mockSdk(), callbacks=[];
+  mock.sdk.Transport.prototype.setDeviceLostCallback=function(callback){callbacks.push(callback);};
+  const s=new FlashSession(async()=>mock.sdk),port={};
+  await s.connect(port); await s.disconnect();
+  await s.connect(port); callbacks[0]();
+  assert.ok(s.device); assert.equal(s.lost,false);
+  callbacks[1](); assert.equal(s.device,null); assert.equal(s.lost,true);
+  await s.disconnect();
+});

@@ -56,7 +56,10 @@ export class FlashSession {
         const { ESPLoader, Transport } = await stage('加载刷机库', this.timeouts.sdk, () => this.loadSdk());
         this.lease = new SerialPortLease(port, { closeTimeout: this.timeouts.close, onStage: this.onStage });
         this.transport = new Transport(this.lease, false);
-        this.transport.setDeviceLostCallback?.(() => this.markLost(port));
+        const transport = this.transport;
+        transport.setDeviceLostCallback?.(() => {
+          if (this.transport === transport) this.markLost(port);
+        });
         const info = port.getInfo?.() || {};
         // Keep native USB-Serial/JTAG open rather than provoking a close/reopen
         // and DTR/RTS transition just to change a USB line-coding baud value.
