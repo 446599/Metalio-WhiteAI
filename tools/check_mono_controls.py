@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run production font, reader, controls and archive code with host hardware adapters."""
+"""Run production font, controls and archive code with host hardware adapters."""
 from pathlib import Path
 import os, subprocess, tempfile
 ROOT=Path(__file__).resolve().parents[1]
@@ -9,7 +9,7 @@ with tempfile.TemporaryDirectory(prefix='whiteai-mono-') as folder:
     files=['tools/tests/mono_controls_contract.cc','tools/tests/mono_font_stub.cc',
            'main/display/font/raw_font.cc','main/input/text_input.cc','main/notes/note_store.cc',
            'main/notes/note_writer.cc','main/reminders/reminder_store.cc',
-           'main/xiaozhi/conversation.cc','main/reader/reader_service.cc','main/system/quick_controls.cc']
+           'main/xiaozhi/conversation.cc','main/system/quick_controls.cc']
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-Wall','-Wextra','-Werror',
        '-fsanitize=address,undefined','-fno-omit-frame-pointer','-pthread',
        '-I',str(ROOT/'tools/tests/mono_stubs'),'-I',str(ROOT/'main'),'-I',str(cjson),

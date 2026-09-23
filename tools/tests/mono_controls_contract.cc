@@ -6,8 +6,6 @@
 #include "test_platform.h"
 #include "input/keyboard_layout.h"
 #include "input/gesture.h"
-#include "reader/book_text.h"
-#include "reader/reader_service.h"
 #include "system/quick_controls.h"
 #include "notes/conversation_note.h"
 #include "notes/note_writer.h"
@@ -50,9 +48,6 @@ int main(int argc,char** argv){
      CHECK(raw_font::Pixel(f,x,y)==(2*ink>=total));
    }
  }
- CHECK(reader::FileName("中文.TXT"));for(const auto& bad:{"../x.txt",".txt","a/b.txt","a\\b.txt","bad.pdf"})CHECK(!reader::FileName(bad));
- std::string text="\xef\xbb\xbf你好\t世界\r\n";CHECK(reader::Normalize(text));CHECK(text=="你好 世界\r\n");
- text=std::string("a\0b",3);CHECK(!reader::Normalize(text));text=std::string(reader::kBookBytes+1,'x');CHECK(!reader::Normalize(text));
  notes::Note draft;std::string error;xiaozhi::ConversationSnapshot source;
  source.transcript="磁铁孔要先试装";source.answer="先制作试装件";source.content_revision=3;
  CHECK(!notes::PrepareConversationNote(source,draft,error));source.state=xiaozhi::TurnState::Done;
@@ -81,16 +76,5 @@ int main(int argc,char** argv){
  CHECK(tasks.size()==pending_tasks && GetHAL().scan_calls==scans);
  CHECK(settings.Snapshot().message.find("停用")!=std::string::npos);
 #endif
- // Actual bounded book service reads host files, creates pages and NVS bookmarks.
- std::ofstream(folder/"chapter.txt")<<std::string(3000,'A');std::ofstream(folder/"ignore.pdf")<<"not txt";
- auto& books=reader::Service::Instance();CHECK(books.List());CHECK(!books.List());RunTasks();CHECK(books.Get().files.size()==1);
- CHECK(!books.Open("../chapter.txt"));CHECK(books.Open("chapter.txt"));RunTasks();CHECK(books.Get().opened && books.Get().pages>1);
- CHECK(books.Turn(1));RunTasks();CHECK(books.Get().page==1);const auto bookmark=durable["reader/position"];
- CHECK(books.List());RunTasks();CHECK(books.Open("chapter.txt"));RunTasks();CHECK(books.Get().page==1);
- test_commit_ok=false;CHECK(books.Turn(1));RunTasks();CHECK(books.Get().page==2 && books.Get().message.find("失败")!=std::string::npos);CHECK(durable["reader/position"]==bookmark);test_commit_ok=true;
- GetHAL().sd=false;CHECK(books.Open("chapter.txt"));RunTasks();CHECK(books.Get().message=="SD 卡不可用");CHECK(books.Get().page==2);GetHAL().sd=true;
- std::ofstream(folder/"invalid.txt",std::ios::binary)<<std::string("a\0b",3);CHECK(books.Open("invalid.txt"));RunTasks();CHECK(books.Get().message.find("UTF-8")!=std::string::npos);
- std::ofstream(folder/"large.txt")<<std::string(reader::kBookBytes+1,'x');CHECK(books.Open("large.txt"));RunTasks();CHECK(books.Get().message.find("256")!=std::string::npos);
- test_task_ok=false;CHECK(!books.List());CHECK(!books.Get().busy);test_task_ok=true;
- std::printf("Mono controls PASS: %d CHECKs; native font/area resampling, layout, immutable archive, alert rollback, BLE lifecycle requests and actual book files/bookmarks (hardware mocked)\n",checks);
+ std::printf("Mono controls PASS: %d CHECKs; native font/area resampling, layout, immutable archive, alert rollback and BLE lifecycle requests (hardware mocked)\n",checks);
 }

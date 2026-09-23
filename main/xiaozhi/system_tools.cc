@@ -17,7 +17,7 @@ constexpr Spec specs[]={
 
 {"self.device.get_status",R"({"name":"self.device.get_status","description":"读取本机电量、充电、音量、网络、当前应用和录音状态。用于设备管家与状态问答，不返回凭据。","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})"},
 {"self.device.set_volume",R"({"name":"self.device.set_volume","description":"设置扬声器音量0到100。返回操作ID；queued只表示已排队，需action_status确认完成。","inputSchema":{"type":"object","properties":{"volume":{"type":"integer","minimum":0,"maximum":100}},"required":["volume"],"additionalProperties":false}})"},
-{"self.display.open",R"({"name":"self.display.open","description":"打开本机应用。home首页，alarm闹钟，calendar日历，recorder录音，assistant小智，voice_note语音文字笔记，notes AI笔记，capsules最近胶囊，reader阅读，apps应用目录，device设备选项，status设备状态。响铃时拒绝覆盖。返回操作ID，用action_status确认。","inputSchema":{"type":"object","properties":{"app":{"type":"string","enum":["home","alarm","calendar","recorder","assistant","voice_note","notes","capsules","reader","apps","device","status"]}},"required":["app"],"additionalProperties":false}})"},
+{"self.display.open",R"({"name":"self.display.open","description":"打开本机应用。home首页，alarm闹钟，calendar日历，recorder录音，assistant小智，voice_note语音文字笔记，notes AI笔记，capsules最近胶囊，apps应用目录，device设备选项，status设备状态。响铃时拒绝覆盖。返回操作ID，用action_status确认。","inputSchema":{"type":"object","properties":{"app":{"type":"string","enum":["home","alarm","calendar","recorder","assistant","voice_note","notes","capsules","apps","device","status"]}},"required":["app"],"additionalProperties":false}})"},
 {"self.display.calendar",R"({"name":"self.display.calendar","description":"打开指定北京时间日期的月历和日程。date格式YYYY-MM-DD，可用于查看明天或下周某日，界面支持当前月份前后10年。","inputSchema":{"type":"object","properties":{"date":{"type":"string"}},"required":["date"],"additionalProperties":false}})"},
 {"self.dashboard.get",R"({"name":"self.dashboard.get","description":"读取设备已获取的天气、额度和更新时间/新鲜度。晨间简报可组合clock、reminders.list和notes.list；没有数据时不要编造天气。不是任意城市搜索或天气预报。","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})"},
 {"self.dashboard.refresh",R"({"name":"self.dashboard.refresh","description":"请求后台更新设备天气和额度；requested不表示获取成功，之后用dashboard.get读取真实更新时间和状态。","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})"},
@@ -123,7 +123,7 @@ ToolReply SystemTools::Handle(const char* name,const cJSON* args,int64_t now) {
         command.kind=SystemCommand::Kind::Volume;
     } else if (is("self.display.open")) {
         const char* app=Text(args,"app");
-        const char* apps[]={"home","alarm","calendar","recorder","assistant","voice_note","notes","capsules","reader","apps","device","status"};
+        const char* apps[]={"home","alarm","calendar","recorder","assistant","voice_note","notes","capsules","apps","device","status"};
         if (!Keys(args,{"app"}) || !app || std::none_of(std::begin(apps),std::end(apps),[app](const char* a){return !std::strcmp(a,app);})) return bad();
         command.kind=SystemCommand::Kind::Open;command.value=app;
     } else if (is("self.display.calendar")) {

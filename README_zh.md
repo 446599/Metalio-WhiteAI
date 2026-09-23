@@ -1,227 +1,322 @@
-# Metalio AI 墨水屏首页
+# Metalio AI 墨水屏固件
 
-面向 **Metalio E-Ink 4**（ESP32-S3、GDEM0397T81 / SSD1677）的 AI 墨水屏固件。
-设备上电后直接进入低刷新、易阅读的首页，绘制完全走 raw framebuffer 的
-1-bit 路径，当前目标不会编译或链接 LVGL。
+面向 **Metalio E-Ink 4**（ESP32-S3 + 800×480 墨水屏）的产品固件。设备上电后直接进入
+首页，通过 AI 语音键与小智完成对话、笔记归档、闹钟设置等操作。
+
+绘制完全走 **raw 1-bit framebuffer** 路径，当前目标**不编译也不链接 LVGL**；
+色彩只有黑与白，没有灰阶、没有动画过渡，刷新策略以"少闪、少残影"为优先。
+
+English: [README.md](README.md)。二次开发请看 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 | 项目 | 说明 |
 |------|------|
 | 工程名 | `metalio-hw-test` |
-| 芯片 | ESP32-S3 |
+| 芯片 | ESP32-S3（QFN56，8 MB PSRAM，16 MB Flash） |
 | 开发板 | Metalio E-Ink 4 |
 | 屏幕 | 800×480，SSD1677（逻辑 UI 为 480×800 竖向坐标） |
-| 触摸 | CST816S |
-| 已验证环境 | ESP-IDF 6.0.1（目标版本 5.5.2 及以上） |
+| 触摸 | CST816S（电容，IRQ 模式） |
+| 已验证环境 | ESP-IDF **6.0.1** |
 | 应用分区地址 | `0x80000` |
+| 字体分区地址 | `0xae4000`（独立分区，首次部署必须单独烧写） |
 
-English: [README.md](README.md)。产品信息架构与后续路线见
-[docs/AI_PRODUCT_PLAN.md](docs/AI_PRODUCT_PLAN.md)。
+---
 
-## 界面与首页
+## 一、系统功能
 
-当前产品界面采用 Nothing 风格的黑白极简排版：32 px 统一边距、静态点阵大时钟、
-四格常用应用、小圆形选中编号以及简洁列表。点阵数字直接由几何圆点绘制，
-仅随分钟变化刷新；中文沿用固件内置位图字体。
+### 1. 首页
 
-首页保留时钟、日期、网络电量，以及闹钟、日历、录音、小智四格入口。
-底部将“应用目录”和“设备选项”分开；天气、额度和同步状态集中到设备状态页。
-闹钟列表支持开关与分页；月历可翻月、选日期查看日程，通过语音添加闹钟或日程。
+顶部状态栏显示网络状态与电量百分比；中部是静态点阵大时钟与日期；下方四个常用入口
+（**闹钟 / 日历 / 笔记 / 小智**）；底部固定**应用目录**与**设备选项**。
 
-录音页同时提供本地录音回放和新建语音文字笔记。本地录音最长 30 秒，保存最近一段：
-SD 可用时写入 `/sdcard/recordings/latest.wav` 并保留恢复副本，重启后可回放；
-没有 SD 存档时明确显示仅本次开机保留。来闹钟和离开页面会停止录音/回放。
-“新建语音文字笔记”进入原文视图，按住 AI 键说话、松开识别，文字沿用胶囊自动保存。
-这两种模式独立，目前不支持上传已经录好的 WAV 文件转写。
+时钟按分钟刷新，只重绘变化的区域（`refresh=partial`），避免整屏闪烁。
+首页平时不显示底部提示条，只有通知出现时临时占用该区域。
 
-CST816S 支持内容区点击；盖板 `HOME / PREV / NEXT` 分别回首页、返回/上一页、
-下一项/下一页，日历页 PREV/NEXT 翻月。BOOT（AI）键按住说话、松开发送。
-首页平时隐藏底部提示，通知临时显示在该区域。音量键继续只控制音量。
+### 2. 应用目录
 
-闪念胶囊已支持识别原文自动保存、AI 回答完成后补存，以及打开最近一条胶囊。
-保存状态按内容版本确认，写入失败会提示。阅读、卡片详情和任务确认仍有演示
-流程，尚未实现真实 SD 书库、多条胶囊历史或任务同步。
+共 **6 项**：闹钟、日历、录音、小智、AI 笔记、我的胶囊。
+其中「录音」只在应用目录里，首页那一格换成了「笔记」。
 
-运行 `python3 tools/check_ui_contract.py` 检查几何；使用装有 Pillow 的 Python
-运行 `python3 tools/render_ui_preview.py`，可直接执行固件绘制函数生成所有页面
-预览。结果位于 `build/ui-preview/`，不需要连接开发板。详细命中坐标和验证边界见
-[UI QA 契约](docs/UI_QA_CONTRACT.md)。
+### 3. AI 语音对话（小智）
 
-## 转化好的位图字体
+- 按住机身 **AI 键（BOOT / GPIO0）** 说话，松开后发送
+- 服务端返回识别文本、思考状态、语音回答；回答通过扬声器播放
+- 支持**继续对话**、**文字提问**（用内置拼音键盘输入）
+- 每一轮结束后原文与回答自动进入**对话历史**（见第 6 节）
 
-`main/display/font/ai_ui_assets.c/.h` 是按工作区另一个 EegoRead 项目的
-格式转换并随固件编译的字体资产：码点表排序，字形按行存储，使用
-MSB-first 2bpp 覆盖率。raw renderer 在写入 SSD1677 的 1-bit framebuffer 时
-做阈值化，因此设备端不需要运行时字体栅格器，也不依赖 LVGL。
-`generate_assets.py` 保留了基于 Pillow 的转换流程；烧录时只使用生成好的
-C 文件，不需要 Python 或字体包。
+整轮有界：等待 hello 10 秒、松手后等待识别 20 秒、无有效进展 45 秒、整轮 180 秒。
+超时会明确报错并重置传输，**不会无限卡在"正在识别"**。
 
-仓库里原有的 LVGL 适配器和硬件测试页仍保留，方便后续板级诊断；当前产品
-目标在 `main/CMakeLists.txt` 中只编译 raw 首页所需的源文件。
+### 4. AI 笔记
 
-## 天气、额度与离线快照
+对某一轮对话做二次加工，四个快捷操作（回答完成后出现在 AI 页）：
 
-`dashboard::DashboardService` 是独立 FreeRTOS 任务：默认请求 Open-Meteo
-北京接口，也支持配置额度 JSON 接口；所有响应按 16 KiB 上限分块读取，成功
-后把最近一次天气和额度保存到 NVS，断网时设备状态页仍显示最近快照。日程、摘要和
-自定义卡片同样可由 NVS 写入。
+| 操作 | 行为 |
+|------|------|
+| 整理灵感 | 把原文整理成通顺的条目 |
+| 待办草稿 | 提炼成待办清单（**只生成草稿，不会自动创建提醒**） |
+| 翻译英文 | 把原文翻译成英文 |
+| 存为笔记 | 直接保存为笔记，保留原文 |
 
-可用配置键：
+笔记**最多 8 条**，每条标题 96 / 正文 1536 UTF-8 字节，按字节限制、不截断多字节字符。
+支持新建、搜索、编辑；离开有未保存草稿时需要确认。保存走独立任务，
+提交成功才进详情页，失败会留在编辑页保留草稿。
 
-```text
-dashboard/weather_url              # 可选，默认 Open-Meteo 北京接口
-dashboard/weather_loc              # NVS 键名遵守 15 字节上限
-dashboard/quota_url                # 可选额度 JSON 接口
-dashboard/quota_token              # 可选 Bearer token
-dashboard/refresh_minutes          # 1..120，默认 10 分钟
-dashboard/custom0_* / custom1_*    # title、value、detail、enabled
-dashboard/schedule0_time/title、dashboard/sched0_detail .. sched2_detail
-dashboard/summary0 .. summary2
-xiaozhi/enabled                    # 默认 true
-xiaozhi/version                    # 二进制协议版本，默认 1（裸 Opus）
-xiaozhi/ota_url                    # 激活/OTA 端点，默认 api.tenclass.net/xiaozhi/ota/
-xiaozhi/url                        # 默认 wss://api.tenclass.net/xiaozhi/v1/
-xiaozhi/token                      # 写入部署用 token
+> 注意：整理/待办/翻译依赖云端模型**主动调用设备的 `self.chat.get_task` 工具**读取原文。
+> 若所连服务端的模型不按工具说明调用，这三项会明确报错，而不是伪装成功。
+
+### 5. 闪念胶囊
+
+按住 AI 键说话，**识别原文自动保存**；AI 回答完成后补存回答。
+胶囊保存在 NVS，用于"最近说过什么"这类快速回看，与笔记、对话历史相互独立。
+
+### 6. 对话历史
+
+每一轮问答自动落盘到 SD 卡：
+
+- 上限 **64 个会话**，每个会话 **128 轮**；满 128 轮后下一轮新建会话，
+  总会话满则提示删除，**不静默淘汰历史**
+- 每轮原文 1536 / 回答 6144 UTF-8 字节上限，超长显示截断标记
+- 支持**新建 / 打开 / 继续 / 删除**会话；每轮记录保留原始来源
+- 待写队列至多 8 轮，SD 不可用时暂存重试，队列满则拒绝开始下一轮，避免悄悄丢内容
+
+### 7. 闹钟与日程
+
+- 支持一次性与重复（每天 / 工作日 / 周末 / 自定义星期）
+- 到点弹出全屏提醒界面，播放铃声并振动
+- 支持稍后提醒（snooze），重复提醒的原始时间不会被 snooze 改写
+- 月历可翻月、选日期查看当天日程
+- 可通过语音或 MCP 工具创建、修改、删除、停止
+
+铃声路径与语音播报共用同一个播放任务；两者都验证过实际出声。
+
+### 8. 天气
+
+通过 Open-Meteo 查询**指定城市**的当前天气（城市名搜索，不预设北京等固定位置）。
+成功后写入带来源绑定的本地缓存；查询失败会保留上一次有效数据并标注新鲜度，
+**不会用过期数据冒充最新**。语音回合进行中会推迟天气等可选 HTTP 请求，避免抢占带宽。
+
+### 9. 录音
+
+本地录音最长 30 秒，只保留最近一段。SD 可用时写入 `/sdcard/recordings/latest.wav`
+并保留恢复副本，重启后可回放；没有 SD 存档时明确提示"仅本次开机保留"。
+来闹钟或离开页面会停止录音与回放。
+
+### 10. Wi-Fi 配网
+
+设备选项 → Wi-Fi：
+
+- 自动扫描附近 2.4 GHz 网络，按信号排序，按名称+安全类型去重，**最多 24 项、每页 5 项**
+- 点击网络 → 输入密码 → 连接；隐藏网络可手动添加
+- 仅支持开放网络与 WPA/WPA2/WPA3 Personal；WEP、企业网络显示为不支持
+- **凭据只在目标 SSID 成功获取 IP 之后才提交保存**，失败或取消不会写入
+- 4G 与 Wi-Fi 模式切换需要二次确认并重启
+
+### 11. 本地输入（拼音键盘）
+
+内置离线输入法，**不联网、不调用云端**：
+
+- 支持中文拼音、英文大小写、数字、全部可打印 ASCII 符号、空格、退格、左右光标
+- 中文基于固定 GB2312 字库范围的拼音表（413 音节 / 6763 字），输入完整拼音后点候选词，右侧翻页
+- `v` 表示 `ü`，单引号作音节分隔
+- 密码使用独立英文键盘，默认遮罩，可显式显示；**不发送给模型、不写日志**，退出或提交时清理编辑缓冲
+
+### 12. 快捷控制
+
+在内容区**下拉**唤出快捷面板，可调节音量、查看/切换网络、系统提示等。
+面板与页面互斥：来提醒时优先显示提醒，快捷面板自动收起。
+
+### 13. 锁屏与休眠
+
+- **短按 POWER 键**锁屏/唤醒；长按仍是关机
+- 空闲 **5 分钟**自动锁屏；锁屏界面可显示壁纸（默认或自定义 PBM）
+- 进入受保护的**浅睡眠**：暂停 Wi-Fi、DMA、功放，有闹钟时按闹钟时间唤醒
+- 录音、播放、提醒、笔记写入、SD 操作进行中不会休眠
+
+### 14. MCP 工具（27 个 / 9 页）
+
+小智服务端可通过 MCP 通道调用设备能力，覆盖闹钟日程、笔记、音量、应用跳转、
+录音控制、天气、状态查询、对话任务读取等。**27 个工具分 9 页**返回，
+异步操作有操作 ID 与明确完成状态（`queued` 只代表已排队）。
+
+详见 [docs/AI_SYSTEM_MCP.md](docs/AI_SYSTEM_MCP.md)。
+
+---
+
+## 二、按键与操作
+
+| 输入 | 行为 |
+|------|------|
+| 内容区点击 | 进入对应条目 / 按钮 |
+| 内容区下拉 | 唤出快捷控制面板 |
+| `HOME`（盖板键） | 回首页 |
+| `PREV` | 返回上一级 / 上一页 |
+| `NEXT` | 下一项 / 下一页（日历页翻月） |
+| `AI`（BOOT，按住） | 说话；松开发送 |
+| `POWER` 短按 | 锁屏 / 唤醒 |
+| `POWER` 长按 | 关机 |
+| 音量 +/− | 只调节音量 |
+
+---
+
+## 三、构建与烧录
+
+### 环境
+
+```sh
+export IDF_PATH=/Users/henry/.espressif/v6.0.1/esp-idf
+source /Users/henry/.espressif/v6.0.1/esp-idf/export.sh
 ```
 
-`w_*` 和 `q_*` 是服务自动写入的快照键，清除它们即可恢复为离线默认内容。
+### 构建
 
-## 小智移植范围
-
-`xiaozhi::Client` 已接入 Xiaozhi v1 WebSocket 的 hello、session、listen、
-abort 控制消息，并把 hello、STT、LLM、TTS、绑定和工具事件映射到 AI 卡片。
-凭据只从 `xiaozhi` NVS 读取，不写入日志。
-
-`xiaozhi::AudioSession` 负责音频方向，并按参考实现对上下行使用不同时钟：
-
-设备必须先绑定：`xiaozhi::Activation` 在联网后调用官方 OTA 端点
-`https://api.tenclass.net/xiaozhi/ota/`，把返回的 `activation.code` 显示在
-小智应用的绑定页上（首页小智入口显示“请绑定设备”），并按 `websocket.url`/`token` 切换到
-服务端下发的通道、用 `server_time` 校准首页时钟。绑定码在小智控制台
-（`xiaozhi.me`）输入后，设备每 10 秒轮询 `<ota_url>/activate`，收到 200
-即变为“小智已绑定”。未绑定时服务端不会识别语音，这也是之前一直收不到
-STT/TTS 的原因。
-
-二进制帧版本由 `xiaozhi/version` 决定，默认 1：按官方协议文档，版本 1 是
-**裸 Opus**，版本 3 才带 `{type, reserved, payload_size_be16}` 包头，HTTP
-头 `Protocol-Version` 必须与 hello 里的 `version` 一致。下行两种格式都能
-识别。
-
-- 上行固定用板载麦克风时钟（16 kHz / 60 ms），默认版本 1 发送裸 Opus；
-  仅版本 3 使用 `{type, reserved, payload_size_be16}` 包头；
-- 下行按服务端 hello 的采样率（本部署为 24 kHz）打开解码器，再用线性插值
-  重采样回板载 16 kHz 扬声器时钟；
-- 收到 `stt` 或 TTS 开始时自动停采集，避免把自己的扬声器声音回灌服务端。
-
-点击 AI 区进入对话页；按住 BOOT（AI）键开始聆听，松开发送。取消未完成对话
-会重建会话，连接完成后需重新按键，避免旧响应串入下一轮。编解码器只在对应方向
-忙碌时打开，停止聆听或断线后会释放 Opus 堆和
-已排队音频；采集/播放任务栈为 40 KiB / 24 KiB（libopus 实测需要约 25 KiB，
-8 KiB 会栈溢出），队列 8 包约半秒，满了丢最旧一帧。
-
-`XIAOZHI_STATS?` 返回收发计数、编解码错误、输入峰值、三个采样率、连接与
-会话标志、任务栈余量和剩余堆；`AI_TEXT?` 返回 AI 卡当前的状态与三行文字，
-因此不用拍照也能确认对话内容。
-
-## 自然语言闹钟与日程
-
-已接入小智设备侧 MCP：可以说“五分钟后提醒喝水”“每个工作日八点提醒出门”，
-也可查询、修改、取消本机日程。设置保存在 NVS，重启后恢复；到点进入独立闹钟页，
-播放默认“轻铃”并振动。触摸“停止闹钟”或“稍后 5 分钟”处理，普通按键不会取消。
-稍后提醒也会持久保存，不改变重复闹钟原来的时间。目前不支持关机唤醒和手机日历同步。
-
-最多 16 项，北京时间；首页显示下一闹钟和安排数量，闹钟每页四项，日历按日期查看；只在工具返回成功后算设置完成。
-旧 `dashboard/schedule*` 静态展示值由本地提醒列表替代。
-工具字段、重复规则和串口验证见 [本地提醒 MCP 说明](docs/REMINDERS_MCP.md)。
-
-## 编译
-
-```bash
-export IDF_PATH=/Users/henry/.espressif/v6.0.1/esp-idf
-export IDF_PYTHON_ENV_PATH=/Users/henry/.espressif/python_env/idf6.0_py3.14_env
-idf.py set-target esp32s3
+```sh
+idf.py set-target esp32s3     # 首次
 idf.py build
 ```
 
-生成镜像为 `build/metalio-hw-test.bin`。当前镜像小于 5 MiB OTA 应用槽。
+`idf.py build` 会自动完成三件事，任一失败就不应烧录：
 
-## 烧录与串口
+1. 校验完整字库（45248 字形）并生成 `build/font_data.bin`
+2. **内存预算守卫**：检查 IRAM、共享内部静态内存，并拒绝链接进蓝牙控制器入口
+3. 校验镜像边界并写出 `build/delivery_manifest.json`（含各镜像 SHA-256）
 
-应用更新保留 bootloader、分区表和 NVS，只写应用地址 `0x80000`：
+### 首次部署（含分区表与字体）
 
-```bash
-esptool.py --chip esp32s3 --port /dev/cu.usbmodem21101 --baud 921600 \
-  write-flash 0x80000 build/metalio-hw-test.bin
+```sh
+idf.py -p /dev/cu.usbmodemXXXXX flash
 ```
 
-这个 `0x80000` 是本仓库分区表（`partitions/v1/16m.csv`）的应用槽。工作区里
-的 EegoRead/A4 固件使用不同布局（应用在 `0x10000`），因此换板前先读
-`0x8000` 处的分区表确认；布局不一致时要连 bootloader 和分区表一起烧写，
-只写应用会覆盖到 NVS 区域并且无法启动。
+会写 bootloader、分区表、otadata、应用与完整字库，**并重置 OTA 槽选择**。
+不包含 NVS，不会清空用户数据。
 
-实际操作前先用 `esptool.py chip-id` 核对目标 MAC。串口日志可以证明
-SSD1677、CST816S 和任务完成初始化；`Hash of data verified` 只证明 Flash
-读回校验，不等于已经观察到屏幕像素或完成实体触摸验收，后两项需要直接看
-板子。
+### 已有设备更新（推荐）
 
-## 板级诊断
+先确认设备分区表与本次构建一致：
 
-原有电池、按键、马达、音频、蓝牙、Wi-Fi/4G、SD 等 HAL 与测试源仍在仓库中，
-可用于单独的 bring-up 构建；产品启动路径使用上面的 raw AI 首页。
-
-## 串口读屏与模拟触摸
-
-USB Serial/JTAG 在 `/dev/secondary` 上提供一套诊断协议。主机可以读取当前
-480×800 逻辑竖屏帧，或注入和真实触摸相同的点击/按下/移动/抬起事件；帧数据
-带 CRC32，主机工具会校验后再写入 PBM 文件：
-
-```bash
-python3 tools/miaoink4_serial.py frame --out /tmp/home.pbm
-python3 tools/miaoink4_serial.py tap 240 300
-python3 tools/miaoink4_serial.py gesture 240 300 120 300
-python3 tools/miaoink4_serial.py key SELECT CLICK
-python3 tools/miaoink4_serial.py key HOME CLICK
+```sh
+python3 -m esptool --chip esp32s3 --port <PORT> read-flash 0x8000 0x1000 /tmp/part.bin
+python3 tools/check_build_delivery.py --device-partition-table /tmp/part.bin
 ```
 
-协议命令还包括 `FRAME_PANEL?`、`STATE?`、`SCREEN_TEST?`、`HOME?` 和
-`INPUT HELP?`、`XIAOZHI_STATS?`、`XIAOZHI_AUDIO_TEST?`。每个触摸注入命令
-返回 `@@INPUT_ACK`；`KEY/BUTTON` 可注入 `HOME`、`PREV`、`NEXT` 和 `SELECT`
-验证盖板触摸键和列表确认；`KEY AI DOWN/UP` 验证 BOOT 按住说话。音量键
-只改变音量，其 NVS 写入和通知绘制已移到主事件任务，避免 esp_timer 栈溢出。串口打开
-可能让 ESP32-S3 复位，因此连续手势必须使用工具的 `gesture` 子命令保持同一
-串口会话。
+然后按需选择：
 
-音频自检不需要服务器：
-
-- `XIAOZHI_AUDIO_TEST?` 先采集约 2 秒麦克风并做 Opus 编解码往返（不播放，
-  避免啸叫），再合成 1 秒 1 kHz 正弦波经同一对编解码器播放；
-- `XIAOZHI_DOWNLINK_TEST?` 把 24 kHz 正弦按 v3 包头打包后送进真正的下行
-  入口，验证「剥包头 → 24 kHz 解码 → 重采样到 16 kHz → 播放」；
-- `XIAOZHI_STATS?` 查看计数与资源，`AI_TEXT?` 查看 AI 卡文字，
-  `WIFI_CONFIG?` 重新进入配网热点。
-
-```bash
-python3 tools/miaoink4_serial.py command XIAOZHI_STATS?
-python3 tools/miaoink4_serial.py --timeout 20 command XIAOZHI_AUDIO_TEST?
-python3 tools/miaoink4_serial.py --timeout 40 command XIAOZHI_DOWNLINK_TEST?
-python3 tools/miaoink4_serial.py command 'AI_TEXT?'
-python3 tools/miaoink4_serial.py command 'WIFI_CONFIG?'
+```sh
+idf.py -p <PORT> app-flash     # 只写应用 0x80000（字体未变时用这个）
+idf.py -p <PORT> font-flash    # 只写字库 0xae4000
 ```
 
-实测数据（16 kHz / 60 ms，24 kbps）：麦克风 33/33 帧、每帧 180 字节、
-编码 10.6 ms/帧、解码 1.7 ms/帧、音调 16/16 帧、下行 16/16 帧；任务栈
-余量约 19 KB / 15.8 KB，释放编解码器后内部堆回到约 100 KB。
+两者都不动分区表、OTA 选择与 NVS。完整说明见 [docs/BUILD_DELIVERY.md](docs/BUILD_DELIVERY.md)。
 
-## 许可
+> **串口号每次插拔都可能变化**，不要硬编码。另外如果浏览器里的网页烧录器
+> （Web Serial）还占着串口，命令行 esptool 会报 `Resource busy`，先关掉那个页面。
 
-除文件或第三方组件另有说明外，请遵循本仓库及其依赖的适用许可条款。
+---
 
-## 交付与回归
+## 四、验证
 
-完整字体是独立 `font_data` 分区，标准 `idf.py flash` 现包含字体。既有设备
-应用更新使用 `app-flash`，字体更新使用 `font-flash`；先核验设备分区表。详见
-[构建交付](docs/BUILD_DELIVERY.md) 和 [2026-09-19 验证记录](docs/DEVICE_VALIDATION_20260919.md)。
+### 主机检查（不需要设备）
 
+```sh
+python3 tools/check_ui_contract.py        # 页面几何与命中区
+python3 tools/check_ai_contract.py        # AI 会话与保存
+python3 tools/check_dashboard_contract.py # 天气与额度
+python3 tools/check_reminders_contract.py # 闹钟与 MCP
+python3 tools/check_system_tools.py       # 系统 MCP 工具
+python3 tools/check_memory_contract.py    # 语音工作记忆
+```
 
-## AI 系统工具与新版图标
+仓库共有 **24 个 `tools/check_*.py`**，覆盖 UI、AI、天气、闹钟、笔记、记忆、
+输入法、Wi-Fi、录音、休眠、音频、镜像交付等。全部为纯主机运行，
+不依赖硬件，也不联网（少数脚本需要 `managed_components` 里的 cJSON 源码）。
 
-现在通过小智 MCP 提供 21 个工具，支持系统状态、音量、应用切换、专注计时、SD 文字笔记和录音控制。界面增加 AI 笔记目录与分页阅读，使用 Lucide 图标，并对齐电池与百分比。使用示例、能力边界和验证见 [AI 系统工具](docs/AI_SYSTEM_MCP.md)。
+### 界面预览
+
+```sh
+python3 -m pip install Pillow          # 需要 Pillow
+python3 tools/render_ui_preview.py --out build/ui-preview
+```
+
+用**真实的固件绘制代码与位图字体**渲染五组场景（normal / offline / empty / long / stale），
+当前共 **549 帧**。这些是软件预览，**不能代替屏幕实拍**。
+
+> 预览脚本需要 Pillow。如果系统默认 `python3` 没装，可用带 Pillow 的解释器运行，
+> 例如 `python3.12 tools/render_ui_preview.py --out build/ui-preview`。
+
+### 上机诊断（串口协议）
+
+固件在 USB Serial/JTAG 上提供行协议，波特率 921600：
+
+```sh
+PORT=/dev/cu.usbmodemXXXXX
+
+python3 tools/miaoink4_serial.py --port "$PORT" command 'FONT?'          # 字库是否就绪
+python3 tools/miaoink4_serial.py --port "$PORT" command 'STATE?'         # 当前页面
+python3 tools/miaoink4_serial.py --port "$PORT" command 'XIAOZHI_STATS?' # 音频/连接/内存
+python3 tools/miaoink4_serial.py --port "$PORT" command 'CAPSULE_STATE?' # 会话状态机
+python3 tools/miaoink4_serial.py --port "$PORT" frame --out /tmp/x.pbm   # 导出 framebuffer
+python3 tools/miaoink4_serial.py --port "$PORT" tap 240 400              # 模拟触摸
+python3 tools/miaoink4_serial.py --port "$PORT" command 'KEY AI DOWN'    # 模拟按住 AI 键
+```
+
+工具打开串口后会自动释放 DTR/RTS，避免把 ESP32-S3 按在 ROM 下载模式。
+完整命令列表见 [docs/PROJECT_MAP.md](docs/PROJECT_MAP.md)。
+
+---
+
+## 五、已知边界
+
+以下项目**尚未验证或有意不支持**，不要从其他测试通过外推：
+
+- **光学效果未自动化验收**：墨水屏的残影、对比度、刷新观感必须人眼或拍照确认
+- **扬声器音质未仪器测量**：只验证过"音频帧确实写出且无错误"，
+  音量、爆音、长时间 TTS 稳定性未测
+- **真实语音链路依赖服务端**：MCP 工具是否被调用取决于所连服务端的模型行为，
+  固件无法强制；翻译/整理/待办三项尤其受影响
+- **小智长连接会被服务端关闭**：实测约每 50~70 秒一次（对端 `close code=1005`），
+  固件会自动重连，但会话上下文会重建
+- **天气 API 实测记录有限**：公共 Open-Meteo 探测曾在 TLS 握手超时，
+  未记为可用性成功
+- **不支持**：LVGL、灰阶、第三方日历同步、WAV 文件转写、云端输入法
+
+---
+
+## 六、目录结构
+
+```
+main/
+  application.*     启动编排、事件组、UI 工作队列
+  display/          raw framebuffer 绘制、字体、图标、页面路由、快捷控制
+  xiaozhi/          小智 WebSocket、MCP、会话状态机、音频会话
+  chat/             对话历史持久化与源保留记录
+  notes/            AI 笔记存储与保存任务
+  reminders/        闹钟/日程存储与到期处理
+  dashboard/        天气与额度
+  network/          Wi-Fi 配网
+  input/            离线拼音编辑器与键盘布局
+  power/            锁屏与浅睡眠
+  system/           设备控制、启动诊断、构建特性开关
+  hal/              板级驱动（墨水屏、触摸、音频、电源等）
+  apps/             历史硬件诊断应用，不参与产品启动路径
+components/         项目本地 ESP-IDF 组件
+tools/              主机检查、UI 预览、串口工具、资源生成
+docs/               功能说明、验证记录、交付文档
+partitions/v1/      16 MB 分区表
+```
+
+各目录职责与运行时链路详见 [docs/PROJECT_MAP.md](docs/PROJECT_MAP.md)。
+
+---
+
+## 七、相关文档
+
+| 文档 | 内容 |
+|------|------|
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | **二次开发指南**（新增页面、工具、检查；内存与锁约定） |
+| [docs/BUILD_DELIVERY.md](docs/BUILD_DELIVERY.md) | 构建、分区与烧录交付 |
+| [docs/PROJECT_MAP.md](docs/PROJECT_MAP.md) | 目录职责与运行时主链路 |
+| [docs/AI_SYSTEM_MCP.md](docs/AI_SYSTEM_MCP.md) | MCP 工具清单与调用约定 |
+| [docs/CHAT_HISTORY.md](docs/CHAT_HISTORY.md) | 对话历史的容量与持久化 |
+| [docs/INPUT_WIFI.md](docs/INPUT_WIFI.md) | 拼音输入与 Wi-Fi 配网 |
+| [docs/VOICE_MEMORY.md](docs/VOICE_MEMORY.md) | 语音工作记忆（`self.memory.*`） |
+| [docs/SLEEP_CONNECTION.md](docs/SLEEP_CONNECTION.md) | 锁屏、浅睡眠与连接加固 |
+| [docs/UI_QA_CONTRACT.md](docs/UI_QA_CONTRACT.md) | 页面几何与命中区契约 |

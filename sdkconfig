@@ -918,6 +918,13 @@ CONFIG_BOARD_TYPE_METALIO_E_INK_4=y
 # end of Metalio Hardware Test
 
 #
+# WhiteAI product features
+#
+# default:
+# CONFIG_WHITEAI_EXPERIMENTAL_BLE_DISCOVERY is not set
+# end of WhiteAI product features
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set

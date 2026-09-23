@@ -76,7 +76,6 @@ private:
         AiResult,
         AiSteps,
         QuickNote,
-        Reader,
         TodayList,
         CardBox,
         CardDetail,
@@ -110,8 +109,6 @@ private:
     void DrawProductHistoryLocked(bool detail);
     bool HandleHistoryTap(int x,int y);
     bool HandleHistoryKey(HardwareKey key);
-    bool HandleReaderTap(int x,int y);
-    bool HandleReaderKey(HardwareKey key);
     void DrawProductQuickControlsLocked();
     void SetQuickControls(bool open);
     bool HandleQuickPull(int x0,int y0,int x1,int y1,int held_ms);
@@ -152,7 +149,6 @@ private:
     void DrawProductAppsLocked();
     void DrawProductAiLocked(bool details);
     void DrawProductQuickNoteLocked();
-    void DrawProductReaderLocked();
     void DrawProductTodayListLocked();
     void DrawProductCardBoxLocked();
     bool SelectCardSnapshotLocked(int selected);
@@ -222,7 +218,7 @@ private:
     std::atomic_bool quick_controls_open_{false};
     bool quick_bluetooth_=false;
     int quick_ble_page_=0;
-    uint32_t last_quick_revision_=0,last_reader_revision_=0;
+    uint32_t last_quick_revision_=0;
     int book_list_page_=0;
     uint32_t last_history_revision_=0;
     int history_list_page_=0,history_text_page_=0,history_text_pages_=1;

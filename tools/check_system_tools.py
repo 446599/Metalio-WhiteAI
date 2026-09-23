@@ -51,7 +51,7 @@ int main(){
  const auto request=call(++id,"self.device.set_volume","{\"volume\":50}");const auto reply=server.Handle(request,now);
  assert(reply==server.Handle(request,now) && hardware_calls==1 && last.number==50);
  assert(server.Handle("{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"self.device.set_volume\",\"arguments\":{\"volume\":0}}}",now).empty());assert(hardware_calls==1);
- for(const char* app:{"home","alarm","calendar","recorder","assistant","voice_note","notes","capsules","reader","apps","device","status"}) result("self.display.open",std::string("{\"app\":\"")+app+"\"}");
+ for(const char* app:{"home","alarm","calendar","recorder","assistant","voice_note","notes","capsules","apps","device","status"}) result("self.display.open",std::string("{\"app\":\"")+app+"\"}");
  result("self.display.open","{\"app\":\"factory_reset\"}",true);
  result("self.display.calendar","{\"date\":\"2028-02-29\"}");assert(last.value=="2028-02-29");
  result("self.display.calendar","{\"date\":\"2026-02-29\"}",true);

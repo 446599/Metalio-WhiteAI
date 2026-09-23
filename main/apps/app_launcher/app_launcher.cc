@@ -6,7 +6,6 @@
 #include "app_button_test/app_button_test.h"
 #include "app_cell_test/app_cell_test.h"
 #include "app_motor_test/app_motor_test.h"
-#include "app_reader_txt/app_reader_txt.h"
 #include "app_screen_test/app_screen_test.h"
 #include "app_sd_test/app_sd_test.h"
 #include "app_touch_test/app_touch_test.h"
@@ -155,7 +154,6 @@ lv_obj_t* CreateNotes() { return Placeholder({"notes", "备忘录", FONT_AWESOME
 lv_obj_t* CreateSettings() { return Placeholder({"settings", "设置", FONT_AWESOME_GEAR}); }
 lv_obj_t* CreateApps();
 
-void OpenReader(lv_event_t*) { lv_async_call(NavigateAsync, reinterpret_cast<void*>(AppReaderTxt::Create)); }
 void OpenNotes(lv_event_t*) { lv_async_call(NavigateAsync, reinterpret_cast<void*>(CreateNotes)); }
 void OpenSettings(lv_event_t*) { lv_async_call(NavigateAsync, reinterpret_cast<void*>(CreateSettings)); }
 void OpenAi(lv_event_t*) { lv_async_call(NavigateAsync, reinterpret_cast<void*>(CreateAi)); }
@@ -170,7 +168,7 @@ void OpenMusic(lv_event_t*) { lv_async_call(NavigateAsync, reinterpret_cast<void
 
 struct AppEntry { const char* name; const char* glyph; lv_event_cb_t cb; };
 const AppEntry kApps[] = {
-    {"阅读", FONT_AWESOME_GLASSES, OpenReader}, {"AI 助手", FONT_AWESOME_MICROCHIP_AI, OpenAi},
+    {"AI 助手", FONT_AWESOME_MICROCHIP_AI, OpenAi},
     {"备忘录", FONT_AWESOME_PEN_TO_SQUARE, OpenNotes}, {"天气", FONT_AWESOME_CLOUD_SUN, OpenWeather},
     {"番茄钟", FONT_AWESOME_CLOCK, OpenPomodoro}, {"闹钟", FONT_AWESOME_ALARM_CLOCK, OpenAlarm},
     {"日历", FONT_AWESOME_CALENDAR, OpenCalendar}, {"计算器", FONT_AWESOME_CALCULATOR, OpenCalculator},
@@ -245,7 +243,7 @@ lv_obj_t* CreateApps() {
     lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_t* heading = Label(body, "所有应用", TitleFont());
     lv_obj_set_style_margin_bottom(heading, 6, 0);
-    lv_obj_t* subheading = Label(body, "常用工具与阅读入口", SmallFont());
+    lv_obj_t* subheading = Label(body, "常用工具入口", SmallFont());
     lv_obj_set_style_text_color(subheading, lv_color_black(), 0);
     lv_obj_set_style_margin_bottom(subheading, 18, 0);
     // AI 桌面摘要：先显示本地快照，网络适配器接入后通过事件刷新。
@@ -312,7 +310,6 @@ lv_obj_t* AppLauncher::Create() {
         {"今日日程", FONT_AWESOME_CALENDAR, OpenCalendar},
         {"当前天气", FONT_AWESOME_CLOUD_SUN, OpenWeather},
         {"Codex 用量", FONT_AWESOME_SIGNAL, OpenAi},
-        {"继续阅读", FONT_AWESOME_GLASSES, OpenReader},
         {"设置卡片", FONT_AWESOME_GEAR, OpenSettings},
     };
     // AI 桌面摘要：先显示本地快照，网络适配器接入后通过事件刷新。

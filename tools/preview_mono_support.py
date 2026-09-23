@@ -3,7 +3,6 @@ HEADERS = r'''
 #include "system/quick_controls.h"
 #include "power/sleep_service.h"
 namespace power { inline int toggles=0; SleepService& SleepService::Instance(){static SleepService s;return s;} void SleepService::Toggle(){assert(ui_lock_depth==0);++toggles;} }
-#include "reader/reader_service.h"
 #include "notes/conversation_note.h"
 #include "input/gesture.h"
 namespace device {
@@ -18,24 +17,15 @@ bool QuickControls::SetAlerts(bool r,bool v){assert(ui_lock_depth==0);preview_qu
 bool QuickControls::ScanBluetooth(){assert(ui_lock_depth==0);preview_quick.ble_busy=true;preview_quick.nearby.clear();++preview_quick.revision;return true;}
 void QuickControls::CancelBluetooth(){assert(ui_lock_depth==0);preview_quick.ble_busy=false;++preview_quick.revision;}
 }
-namespace reader {
-Snapshot preview_book;
-Service& Service::Instance(){static Service s;return s;}
-Snapshot Service::Get()const{return preview_book;}
-uint32_t Service::Revision()const{return preview_book.revision;}
-bool Service::List(){assert(ui_lock_depth==0);preview_book.opened=false;preview_book.files={"中文笔记.txt","Hardware.txt"};++preview_book.revision;return true;}
-bool Service::Open(const std::string& s){assert(ui_lock_depth==0);preview_book.opened=true;preview_book.title=s;preview_book.page=0;preview_book.pages=3;preview_book.lines={"这是一页用于验证布局的文字。","页面来自实际阅读页的绘图函数。"};++preview_book.revision;return true;}
-bool Service::Turn(int direction){assert(ui_lock_depth==0);if(direction<0){if(preview_book.page)--preview_book.page;}else if(preview_book.page+1<preview_book.pages)++preview_book.page;++preview_book.revision;return true;}
-}
 '''
 FIELDS = r'''
     std::atomic_bool lock_screen_{false},quick_controls_open_{false};
     bool quick_bluetooth_=false;
-    int quick_ble_page_=0,book_list_page_=0;
-    uint32_t last_quick_revision_=0,last_reader_revision_=0;
+    int quick_ble_page_=0;
+    uint32_t last_quick_revision_=0;
     std::string selected_card_title_,selected_card_text_;
 '''
-METHODS = ["SelectCardSnapshotLocked","OpenConversationNote","SetLockScreen","SetQuickControls","HandleQuickPull","HandleQuickKey","HandleQuickTap","HandleReaderTap","HandleReaderKey"]
+METHODS = ["SelectCardSnapshotLocked","OpenConversationNote","SetLockScreen","SetQuickControls","HandleQuickPull","HandleQuickKey","HandleQuickTap"]
 EXERCISE = r'''
     display.ClearFormLocked();display.reminder_alert_.active=false;
     display.product_page_=RawDisplay::ProductPage::Home;
@@ -66,12 +56,9 @@ EXERCISE = r'''
     display.ClearFormLocked();display.product_page_=RawDisplay::ProductPage::Home;
     conversation.Restore("保留原文的离线语音笔记","先核对整理，再点击保存。中文输入在本地处理。");
     display.OpenConversationNote();assert(display.form_active_ && display.draft_note_.raw_text=="保留原文的离线语音笔记");save("ai-archive-draft");
-    display.ClearFormLocked();display.product_page_=RawDisplay::ProductPage::Reader;
-    assert(display.HandleReaderTap(360,90));save("reader-library");assert(display.HandleReaderTap(60,195));save("reader-file");
-    assert(display.HandleReaderKey(RawDisplay::HardwareKey::Next));assert(reader::preview_book.page==1);save("reader-file-page2");
     assert(display.HandleQuickTap(200,20));display.reminder_alert_.active=true;save("controls-alarm-priority");assert(!display.quick_controls_open_);
     display.reminder_alert_.active=false;display.ClearFormLocked();
-    std::puts("Mono UI PASS: real toolbar/reader/keyboard/AI archive routing; all mocked side effects outside display lock");
+    std::puts("Mono UI PASS: real toolbar/keyboard/AI archive routing; all mocked side effects outside display lock");
 '''
 
 EXERCISE += r'''

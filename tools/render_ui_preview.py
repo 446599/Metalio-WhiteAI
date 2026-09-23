@@ -155,7 +155,6 @@ public:
     ProductPage product_page_ = ProductPage::Home;
     int navigation_index_ = 0;
     uint8_t quick_note_state_ = 0;
-    uint8_t reader_page_ = 0;
     int calendar_month_ = 0, calendar_day_ = 0, calendar_events_page_ = 0;
     int alarm_page_ = 0, alarm_pages_ = 1;
     uint32_t alarm_ids_[4]{};
@@ -263,7 +262,7 @@ int main(int argc, char** argv) {
     assert(display.TextWidth(fitted, ui_font_body) <= 160);
     assert(std::strstr(fitted, "…"));
     if (scenario == "long") { display.battery_percent_ = 100; display.charging_ = true; }
-    const char* names[] = {"home", "ai", "steps", "note", "reader", "today", "cards", "detail", "keep", "apps", "tools", "settings", "confirm", "more", "alarm", "recorder", "notes", "note-detail"};
+    const char* names[] = {"home", "ai", "steps", "note", "today", "cards", "detail", "keep", "apps", "tools", "settings", "confirm", "more", "alarm", "recorder", "notes", "note-detail"};
     auto save = [&](const char* name) {
         preview_page = name;
         display.DrawProductScreenLocked();
@@ -294,12 +293,6 @@ int main(int argc, char** argv) {
         display.product_page_ = RawDisplay::ProductPage::QuickNote;
         display.quick_note_state_ = i;
         const auto name = "note-" + std::to_string(i);
-        save(name.c_str());
-    }
-    for (int i = 1; i < 3; ++i) {
-        display.product_page_ = RawDisplay::ProductPage::Reader;
-        display.reader_page_ = i;
-        const auto name = "reader-" + std::to_string(i);
         save(name.c_str());
     }
     display.product_page_ = RawDisplay::ProductPage::Recorder;
@@ -377,7 +370,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix='miaoink-ui-') as temporary:
         host = Path(temporary) / 'preview.cc'
         executable = Path(temporary) / 'preview'
-        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/reader_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()+'\n'+(ROOT/'main/display/weather_view.cc').read_text()))
+        host.write_text(host_source(SOURCE.read_text()+'\n'+(ROOT/'main/display/system_view.cc').read_text()+'\n'+(ROOT/'main/display/input_view.cc').read_text()+'\n'+(ROOT/'main/display/quick_controls_view.cc').read_text()+'\n'+(ROOT/'main/display/history_view.cc').read_text()+'\n'+(ROOT/'main/display/lock_screen_view.cc').read_text()+'\n'+(ROOT/'main/display/weather_view.cc').read_text()))
         cjson = ROOT / "managed_components/espressif__cjson/cJSON"
         subprocess.run(["cc", "-c", str(cjson / "cJSON.c"), "-I", str(cjson), "-o", str(Path(temporary)/"cjson.o")], check=True)
         subprocess.run([compiler, '-std=c++17', '-O1', '-DFONTPACK_HOST_TEST', '-x', 'c++', '-I', str(ROOT / 'main'),

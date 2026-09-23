@@ -7,8 +7,6 @@ set(SOURCES
             "display/system_view.cc"
             "display/input_view.cc"
             "display/history_view.cc"
-            "display/reader_view.cc"
-            "reader/reader_service.cc"
             "input/text_input.cc"
             "network/setup_model.cc"
             "network/wifi_setup.cc"
@@ -103,7 +101,6 @@ list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/hal/${BOARD_TYPE})
 idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     REQUIRES uart-uhci
-                             reader_text
                              esp_driver_gpio
                              esp_driver_i2c
                              esp_driver_spi

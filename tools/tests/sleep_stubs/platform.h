@@ -9,12 +9,12 @@
 namespace sim {
 inline int64_t us=1000000,epoch=1770000000,last_sleep=0;
 inline bool usb=false,key=false,wifi=true,wifi_started=true,radio_ok=true,resume_ok=true,codec_ok=true,paused=false,audio=false,pa=true,poll=false;
-inline bool client_busy=false,client_ready=true,dashboard_ready=true,storage_busy=false,radio_busy=false,alarm=false,writer_busy=false,reader_busy=false,usb_disk=false,editing=false;
+inline bool client_busy=false,client_ready=true,dashboard_ready=true,storage_busy=false,radio_busy=false,alarm=false,writer_busy=false,usb_disk=false,editing=false;
 inline bool buttons=false; inline int button_stop_error=0,button_resume_error=0;
 inline int pending=0,sleep_calls=0,sleep_error=0,wake_cause=1,config_error=0,draws=0,unlocks=0;inline int idle_sec=300;
 inline std::string message;
 inline std::vector<reminders::Item> reminders;
-inline void Reset(){buttons=false;button_stop_error=button_resume_error=0;us+=1000000000;usb=key=false;wifi=wifi_started=radio_ok=resume_ok=codec_ok=pa=true;paused=audio=poll=false;client_busy=storage_busy=radio_busy=alarm=writer_busy=reader_busy=usb_disk=editing=false;client_ready=dashboard_ready=true;pending=sleep_error=config_error=0;wake_cause=1;message.clear();reminders.clear();}
+inline void Reset(){buttons=false;button_stop_error=button_resume_error=0;us+=1000000000;usb=key=false;wifi=wifi_started=radio_ok=resume_ok=codec_ok=pa=true;paused=audio=poll=false;client_busy=storage_busy=radio_busy=alarm=writer_busy=usb_disk=editing=false;client_ready=dashboard_ready=true;pending=sleep_error=config_error=0;wake_cause=1;message.clear();reminders.clear();}
 }
 inline int64_t esp_timer_get_time(){return sim::us;}
 inline time_t fake_time(time_t* p){if(p)*p=sim::epoch;return sim::epoch;}
@@ -51,5 +51,4 @@ namespace dashboard {class DashboardService{public:static DashboardService& GetI
 namespace chat {class History{public:struct View{bool busy;int pending;};static History& Instance(){static History h;return h;}View Snapshot(){return {sim::storage_busy,sim::pending};}};}
 namespace network {inline bool Busy(bool value){return value;}class WifiSetup{public:struct View{bool state;};static WifiSetup& Instance(){static WifiSetup w;return w;}View Snapshot(){return {sim::radio_busy};}};}
 namespace notes {class Writer{public:struct View{bool busy;};static Writer& Instance(){static Writer w;return w;}View Snapshot(){return {sim::writer_busy};}};}
-namespace reader {class Service{public:struct View{bool busy;};static Service& Instance(){static Service s;return s;}View Get(){return {sim::reader_busy};}};}
 namespace reminders {class Service{public:static Service& Instance(){static Service s;return s;}bool IsActive(){return sim::alarm;}std::vector<Item> List(){return sim::reminders;}};}

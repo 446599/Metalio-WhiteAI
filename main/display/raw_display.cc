@@ -4,7 +4,6 @@
 #include "chat/history_service.h"
 #include "system/quick_controls.h"
 #include "input/gesture.h"
-#include "reader/reader_service.h"
 #include "network/wifi_setup.h"
 #include "notes/note_writer.h"
 #include "binary_refresh.h"
@@ -703,7 +702,6 @@ void RawDisplay::HandleHomeTap(int x, int y) {
     if (HandleQuickTap(x,y)) return;
     if (HandleHistoryTap(x,y)) return;
     if (HandleSetupTap(x,y)) return;
-    if (HandleReaderTap(x,y)) return;
     if (HandleWeatherTap(x,y)) return;
     enum class Action { None, Gray4, PaperMono, PaperText, AnimDu, AnimFc, PaperPage };
     Action action = Action::None;
@@ -866,7 +864,6 @@ void RawDisplay::HandleHomeTap(int x, int y) {
                 case ProductPage::Keep:
                     next_page = ProductPage::Home;
                     break;
-                case ProductPage::Reader:
                 case ProductPage::CardDetail:
                 case ProductPage::Confirmation:
                     break;
@@ -957,7 +954,6 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
     if (HandleQuickKey(key)) return true;
     if (HandleHistoryKey(key)) return true;
     if (HandleSetupKey(key)) return true;
-    if (HandleReaderKey(key)) return true;
     if (HandleWeatherKey(key)) return true;
     bool scan_wifi = false;
     bool open_controls = false;
@@ -1035,8 +1031,8 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
             };
             auto open_app_selection = [this, &set_page]() {
                 static constexpr ProductPage pages[] = {ProductPage::Alarm,ProductPage::TodayList,
-                    ProductPage::Recorder,ProductPage::AiResult,ProductPage::Notes,ProductPage::QuickNote,ProductPage::Reader};
-                set_page(pages[navigation_index_ % 7]);
+                    ProductPage::Recorder,ProductPage::AiResult,ProductPage::Notes,ProductPage::QuickNote};
+                set_page(pages[navigation_index_ % 6]);
             };
 
             switch (key) {
@@ -1105,8 +1101,6 @@ bool RawDisplay::HandleHardwareKey(HardwareKey key) {
                         ai_show_transcript_=!ai_show_transcript_;ai_text_page_=0;redraw=true;
                     } else if (product_page_ == ProductPage::QuickNote) {
                         set_page(ProductPage::AiResult);restore_recent_capsule=true;
-                    } else if (product_page_ == ProductPage::Reader) {
-                        set_page(ProductPage::Apps);
                     } else if (product_page_ == ProductPage::CardBox) {
                         if(SelectCardSnapshotLocked(navigation_index_)) set_page(ProductPage::CardDetail);
                     } else if (product_page_ == ProductPage::CardDetail) {
@@ -1610,7 +1604,6 @@ void RawDisplay::FrameDumpTask() {
                                 case ProductPage::AiResult: page_name = "ai_result"; break;
                                 case ProductPage::AiSteps: page_name = "ai_steps"; break;
                                 case ProductPage::QuickNote: page_name = "quick_note"; break;
-                                case ProductPage::Reader: page_name = "reader"; break;
                                 case ProductPage::TodayList: page_name = "calendar"; break;
                                 case ProductPage::CardBox: page_name = "card_box"; break;
                                 case ProductPage::CardDetail: page_name = "card_detail"; break;
@@ -2663,7 +2656,7 @@ void RawDisplay::DrawProductControlRailLocked(const char* context) {
     // One passive line. The capacitive cover keys and BOOT retain their routes;
     // there are no on-screen footer buttons or invisible footer hit targets.
     // No permanent help rail on otherwise self-explanatory pages.
-    const bool notice = !quick_controls_open_.load() && !form_active_.load() && product_page_!=ProductPage::Reader && notification_text_[0] != '\0' &&
+    const bool notice = !quick_controls_open_.load() && !form_active_.load() && notification_text_[0] != '\0' &&
                         notification_deadline_ms_ > esp_timer_get_time() / 1000;
     const char* hint = notice ? notification_text_ :
                        (context ? context : "");
@@ -2822,12 +2815,12 @@ void RawDisplay::DrawProductRecorderLocked() {
 void RawDisplay::DrawProductAppsLocked() {
     std::memset(portrait_fb_, kWhite, portrait_size_);
     DrawProductStatusBarLocked();
-    DrawProductHeadingLocked("应用目录", "7 项");
-    static constexpr const char* names[] = {"闹钟", "日历", "录音", "小智", "AI 笔记", "我的胶囊", "阅读"};
-    static constexpr const char* details[] = {"", "", "", "", "", "", ""};
+    DrawProductHeadingLocked("应用目录", "6 项");
+    static constexpr const char* names[] = {"闹钟", "日历", "录音", "小智", "AI 笔记", "我的胶囊"};
+    static constexpr const char* details[] = {"", "", "", "", "", ""};
     static constexpr lucide::Id icons[]={lucide::Id::AlarmClock,lucide::Id::CalendarDays,lucide::Id::Mic,
-        lucide::Id::Bot,lucide::Id::NotebookPen,lucide::Id::StickyNote,lucide::Id::BookOpen};
-    for (int i=0;i<7;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],names[i],details[i],navigation_index_==i);
+        lucide::Id::Bot,lucide::Id::NotebookPen,lucide::Id::StickyNote};
+    for (int i=0;i<6;++i) DrawProductIconRowLocked(kUiBodyY+i*kUiRowPitch,icons[i],names[i],details[i],navigation_index_==i);
     DrawProductControlRailLocked("");
 }
 
@@ -3121,7 +3114,6 @@ void RawDisplay::DrawProductScreenLocked() {
     last_wifi_revision_ = network::WifiSetup::Instance().Revision();
     last_writer_revision_ = notes::Writer::Instance().Snapshot().revision;
     last_quick_revision_ = device::QuickControls::Instance().Revision();
-    last_reader_revision_ = reader::Service::Instance().Revision();
     last_history_revision_ = chat::History::Instance().Revision();
     last_weather_revision_ = dashboard::WeatherSetup::Instance().Revision();
     AdvanceFormsLocked();
@@ -3137,7 +3129,6 @@ void RawDisplay::DrawProductScreenLocked() {
         case ProductPage::AiResult: DrawProductAiLocked(false); break;
         case ProductPage::AiSteps: DrawProductAiLocked(true); break;
         case ProductPage::QuickNote: DrawProductQuickNoteLocked(); break;
-        case ProductPage::Reader: DrawProductReaderLocked(); break;
         case ProductPage::TodayList: DrawProductTodayListLocked(); break;
         case ProductPage::CardBox: DrawProductCardBoxLocked(); break;
         case ProductPage::CardDetail: DrawProductCardDetailLocked(); break;
@@ -4467,7 +4458,6 @@ void RawDisplay::UpdateStatusBar(bool update_all) {
         network::WifiSetup::Instance().Revision()==last_wifi_revision_ &&
         notes::Writer::Instance().Snapshot().revision==last_writer_revision_ &&
         device::QuickControls::Instance().Revision()==last_quick_revision_ &&
-        reader::Service::Instance().Revision()==last_reader_revision_ &&
         chat::History::Instance().Revision()==last_history_revision_ &&
         dashboard::WeatherSetup::Instance().Revision()==last_weather_revision_) return;
     last_minute_ = tmv.tm_min;

@@ -23,7 +23,6 @@ RawDisplay::DeviceSnapshot RawDisplay::SystemSnapshot() {
         case ProductPage::Weather: name="weather";break;
         case ProductPage::NoteCompose: case ProductPage::Notes: case ProductPage::NoteDetail: name="notes";break;
         case ProductPage::QuickNote: name="capsules";break;
-        case ProductPage::Reader: name="reader";break;
         case ProductPage::Apps: name="apps";break;
         case ProductPage::More: name="device";break;
         case ProductPage::WifiList: case ProductPage::WifiCredentials: name="wifi";break;
@@ -42,7 +41,7 @@ bool RawDisplay::OpenSystemApp(const std::string& app,const std::string& date) {
     static constexpr Entry entries[]={
         {"home",ProductPage::Home},{"alarm",ProductPage::Alarm},{"calendar",ProductPage::TodayList},
         {"recorder",ProductPage::Recorder},{"assistant",ProductPage::AiResult},{"voice_note",ProductPage::AiResult},
-        {"notes",ProductPage::Notes},{"capsules",ProductPage::QuickNote},{"reader",ProductPage::Reader},
+        {"notes",ProductPage::Notes},{"capsules",ProductPage::QuickNote},
         {"apps",ProductPage::Apps},{"device",ProductPage::More},{"status",ProductPage::Workbench}};
     const auto entry=std::find_if(std::begin(entries),std::end(entries),[&](const auto& item){return app==item.name;});
     if (entry==std::end(entries) || animation_running_ || reminders::Service::Instance().IsActive()) return false;

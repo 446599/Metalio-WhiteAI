@@ -14,7 +14,6 @@
 #include "chat/history_service.h"
 #include "network/wifi_setup.h"
 #include "notes/note_writer.h"
-#include "reader/reader_service.h"
 #include "reminders/reminder_service.h"
 #include "settings.h"
 #include <wifi_station.h>
@@ -49,13 +48,12 @@ bool SleepService::Busy()const{
     return xiaozhi::Client::GetInstance().BusyForSleep() || stats.capturing || stats.playback_open ||
         stats.decoder_open || stats.reminder_tone || audio.RecorderState().mode!=audio::RecorderMode::Idle ||
         reminders::Service::Instance().IsActive() || network::Busy(network::WifiSetup::Instance().Snapshot().state) ||
-        notes::Writer::Instance().Snapshot().busy || reader::Service::Instance().Get().busy ||
+        notes::Writer::Instance().Snapshot().busy ||
         UsbVirtualDisk::GetInstance().IsGadgetActive() || UsbVirtualDisk::GetInstance().IsBusy();
 }
 bool SleepService::StorageIdle()const{
     const auto history=chat::History::Instance().Snapshot();
-    return !history.busy && history.pending==0 && !notes::Writer::Instance().Snapshot().busy &&
-        !reader::Service::Instance().Get().busy;
+    return !history.busy && history.pending==0 && !notes::Writer::Instance().Snapshot().busy;
 }
 bool SleepService::RestorePeripherals(){
     if(buttons_paused_ && iot_button_resume()==ESP_OK)buttons_paused_=false;

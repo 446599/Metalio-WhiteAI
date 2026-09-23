@@ -15,32 +15,34 @@ the application target.
 | ESP-IDF | 6.0.1 verified (5.5.2+ intended) |
 | Application offset | `0x80000` |
 
-中文说明见 [README_zh.md](README_zh.md)。产品信息架构见
-[docs/AI_PRODUCT_PLAN.md](docs/AI_PRODUCT_PLAN.md)。
+**The Chinese README is the maintained one**: [README_zh.md](README_zh.md)
+covers every product feature, build/flash steps and known limits.
+For adding features, see the [secondary development guide](docs/DEVELOPMENT.md)
+(currently in Chinese). The sections below are a short English summary.
 
 ## Interface
 
-The home screen has a static clock, four app tiles (alarm, calendar, recorder,
-Xiaozhi), and separate app/device directories. Lucide icons share native
-monochrome strokes; battery and percentage align by their visible pixel bounds.
-AI notes have a directory and paginated reading view, backed by two checked SD
-snapshots. Notes do not consume the shared device-settings NVS partition.
+The home screen has a static clock, four tiles (alarm, calendar, notes, Xiaozhi)
+and separate app/device directories. The app directory has six entries:
+alarm, calendar, recorder, Xiaozhi, AI notes and voice capsules.
+Lucide icons share native monochrome strokes.
 
-The Xiaozhi MCP channel exposes **21 tools** for reminders, schedules, focus
-sessions, notes, volume, app navigation, recorder control and real device/weather
-status. Queued operations have IDs and explicit completion states. See
-[AI system tools](docs/AI_SYSTEM_MCP.md) for examples, limits and storage behavior.
+The Xiaozhi MCP channel exposes **27 tools over 9 pages** for reminders,
+schedules, notes, chat history, volume, app navigation, recorder control, weather
+and real device status. Queued operations have IDs and explicit completion
+states. See [AI system tools](docs/AI_SYSTEM_MCP.md).
 
 Content taps and cover keys use the existing routes. HOME returns home, PREV
 goes back, NEXT advances selections/pages, and holding the AI key records speech;
-releasing it sends the utterance. Local audio recording remains a separate
-30-second recorder with SD save and playback. Reading remains a demonstration;
-third-party calendar sync and existing WAV transcription are not implemented.
+releasing it sends the utterance. A short POWER press locks and wakes the screen.
+Local audio recording remains a separate 30-second recorder with SD save and
+playback. Third-party calendar sync and WAV transcription are not implemented.
 
-Run `python3 tools/check_ui_contract.py` for geometry checks. With a C++17
-compiler and Pillow, `python3 tools/render_ui_preview.py` executes actual firmware
-drawing and bitmap fonts across normal, offline, empty, long-content and stale
-scenarios (295 frames). These are software previews, not panel photographs.
+Run `python3 tools/check_ui_contract.py` for geometry checks. There are 24
+`tools/check_*.py` host checks in total. With a C++17 compiler and Pillow,
+`python3 tools/render_ui_preview.py` executes actual firmware drawing and bitmap
+fonts across normal, offline, empty, long-content and stale scenarios.
+These are software previews, not panel photographs.
 
 ## Bitmap fonts
 
