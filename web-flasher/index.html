@@ -14,6 +14,19 @@
   <main>
     <header class="topbar"><a class="brand" href="./" aria-label="WhiteAI 刷机首页"><span class="mark" aria-hidden="true">W</span>WHITEAI<span class="brand-sub">/ FLASH</span></a><span class="chip-tag">ESP32-S3</span></header>
     <section class="intro"><p class="eyebrow">METALIO E-INK 4</p><h1>只更新，你需要的部分。</h1><p class="lede">连接设备，选择分区，写入本地文件。<br class="mobile-break">其余 Flash 扇区保持不动。</p></section>
+    <section class="panel downloads" aria-labelledby="downloads-title">
+      <div class="section-heading"><div><span class="step">00</span><h2 id="downloads-title">下载固件</h2></div><span class="badge">最新发布</span></div>
+      <p class="muted">可直接从本页下载。整包适合存档与分享，单文件适合只更新某一个分区；下好后在第 02 步按分区选择。</p>
+      <div class="download-grid">
+        <a class="download-card featured" href="https://github.com/446599/Metalio-WhiteAI/releases/latest/download/metalio-whiteai-firmware.zip" target="_blank" rel="noopener"><strong>完整固件包</strong><span>5 个镜像 + 校验清单 + 烧录说明 · zip</span></a>
+        <a class="download-card" href="https://github.com/446599/Metalio-WhiteAI/releases/latest/download/metalio-hw-test.bin" target="_blank" rel="noopener"><strong>应用</strong><span>ota_0 · 0x080000 · 3.05 MB</span></a>
+        <a class="download-card" href="https://github.com/446599/Metalio-WhiteAI/releases/latest/download/font_data.bin" target="_blank" rel="noopener"><strong>字库</strong><span>font_data · 0xAE4000 · 4.13 MB</span></a>
+        <a class="download-card" href="https://github.com/446599/Metalio-WhiteAI/releases/latest/download/bootloader.bin" target="_blank" rel="noopener"><strong>Bootloader</strong><span>0x000000 · 16 KB</span></a>
+        <a class="download-card" href="https://github.com/446599/Metalio-WhiteAI/releases/latest/download/partition-table.bin" target="_blank" rel="noopener"><strong>分区表</strong><span>0x008000 · 3 KB</span></a>
+        <a class="download-card" href="https://github.com/446599/Metalio-WhiteAI/releases/latest/download/ota_data_initial.bin" target="_blank" rel="noopener"><strong>OTA 初始选择</strong><span>0x00D000 · 8 KB · 会重置启动槽</span></a>
+      </div>
+      <p class="fineprint">链接始终指向最新发布，文件名固定，因此升级版本后无需改书签。下载不改变本页状态，可以随时回来继续。</p>
+    </section>
     <p id="support" class="notice" role="status" hidden></p>
     <section class="panel connection" aria-labelledby="connection-title">
       <div class="section-heading"><div><span class="step">01</span><h2 id="connection-title">连接设备</h2></div><span id="connection-state" class="badge">未连接</span></div>
