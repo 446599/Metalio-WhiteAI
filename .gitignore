@@ -1,0 +1,5 @@
+# Vendored esptool-js is deployed with this branch so the page needs no CDN.
+__pycache__/
+tests/__pycache__/
+test-results/
+.DS_Store
