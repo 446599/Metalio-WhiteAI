@@ -8,7 +8,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>WhiteAI · 分区刷机</title>
   <link rel="stylesheet" href="./style.css">
-  <script type="module" src="./app.mjs"></script>
+  <script type="module" src="./app.mjs?v=1.1.0"></script>
 </head>
 <body>
   <main>
@@ -30,7 +30,7 @@
     <p id="support" class="notice" role="status" hidden></p>
     <section class="panel connection" aria-labelledby="connection-title">
       <div class="section-heading"><div><span class="step">01</span><h2 id="connection-title">连接设备</h2></div><span id="connection-state" class="badge">未连接</span></div>
-      <div class="connection-line"><div><strong id="device-name">通过 USB 连接你的 WhiteAI</strong><p id="device-detail" class="muted">先关闭串口监视器。连接操作会使设备进入下载模式。</p></div><button id="connect" class="primary">连接设备 <span aria-hidden="true">↗</span></button><button id="disconnect" hidden>断开</button></div>
+      <div class="connection-line"><div><strong id="device-name">通过 USB 连接你的 WhiteAI</strong><p id="device-detail" class="muted">先关闭串口监视器。连接操作会使设备进入下载模式。</p></div><button id="connect" class="primary">连接设备 <span aria-hidden="true">↗</span></button><button id="cancel-connect" hidden>取消连接</button><button id="disconnect" hidden>断开</button></div>
       <details class="connection-settings"><summary>连接选项与帮助</summary><div class="fields"><label>波特率<select id="baud"><option value="115200">115200 · 稳定优先</option><option value="460800">460800</option><option value="921600">921600 · 高速</option></select></label><label>进入下载模式<select id="reset"><option value="default_reset">自动复位</option><option value="no_reset">已手动进入下载模式</option></select></label></div><p class="muted">自动连接失败时，按住 BOOT（AI）键并复位或重新上电，松开后选“已手动进入下载模式”。请确认 USB 处于烧录通路。</p></details>
     </section>
     <section class="panel" aria-labelledby="partition-title">
@@ -44,7 +44,7 @@
     </section>
     <section class="panel flash-panel" aria-labelledby="flash-title"><div class="section-heading"><div><span class="step">03</span><h2 id="flash-title">检查并刷写</h2></div><span class="badge">不执行整片擦除</span></div><p id="result" class="result" role="status" aria-live="polite">尚未开始。请先连接设备，并为已选分区添加文件。</p><progress id="progress" max="100" value="0" aria-label="刷写进度"></progress><div class="flash-actions"><label class="inline-check"><input id="auto-restart" type="checkbox" checked>完成后重启</label><div><button id="restart" disabled>重启设备</button><button id="review" class="primary" disabled>检查刷写计划 <span aria-hidden="true">→</span></button></div></div><p class="muted fineprint">刷写会擦除文件覆盖的完整 4 KiB 扇区，包括末尾不足一扇区的剩余字节。开始后请勿拔线或关闭页面。</p></section>
     <details class="logs"><summary>运行日志 <span id="log-count">0</span></summary><pre id="log" aria-label="运行日志"></pre><button id="save-log" class="text-button">保存日志</button></details>
-    <footer><span>WHITEAI · LOCAL FIRST</span><span>Chrome / Edge 桌面版 · HTTPS 或 localhost</span></footer>
+    <footer><span>WHITEAI · FLASH 1.1.0</span><span>Chrome / Edge 桌面版 · HTTPS 或 localhost</span></footer>
   </main>
   <dialog id="confirmation" aria-labelledby="confirm-title"><form method="dialog"><div class="section-heading"><h2 id="confirm-title">确认这一次写入</h2><button value="cancel" class="close" aria-label="关闭">×</button></div><p class="muted" id="confirm-device"></p><div id="plan-files"></div><div id="plan-warnings" class="warning-box"></div><label class="inline-check acknowledge"><input id="acknowledge" type="checkbox">我已核对设备、启动槽，并备份重要数据。</label><label id="risk-label" hidden>包含敏感分区或自定义地址，请输入 <strong>FLASH</strong><input id="risk-text" type="text" autocomplete="off" spellcheck="false" placeholder="FLASH"></label><p id="confirm-error" class="error" role="alert"></p><div class="dialog-actions"><button value="cancel">返回修改</button><button type="button" id="start" class="primary">开始刷写</button></div></form></dialog>
   <noscript>此工具需要 JavaScript 和 Web Serial。请使用桌面 Chrome 或 Edge。</noscript>

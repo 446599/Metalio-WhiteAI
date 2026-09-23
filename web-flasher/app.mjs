@@ -16,7 +16,10 @@ function log(text) {
   logs = logs.slice(-240); $('log').textContent = logs.join('\n'); $('log-count').textContent = String(logs.length);
   $('log').scrollTop = $('log').scrollHeight;
 }
-const session = new FlashSession(loadSdk, log);
+let connecting = false, connectionStage = '';
+const session = new FlashSession(loadSdk, log, { onStage: name => {
+  connectionStage = name; if (connecting) { result(`${name}…`); updateControls(); }
+} });
 function result(message, kind = '') { $('result').textContent = message; $('result').className = `result ${kind}`; }
 function invalidate() { pending = null; $('progress').value = 0; }
 function setRows(parts) {
@@ -33,6 +36,8 @@ function updateControls() {
   document.querySelectorAll('button,input,select').forEach(node => { node.disabled = busy; });
   $('connect').disabled = busy || active() || !supported;
   $('connect').hidden = active(); $('disconnect').hidden = !active();
+  $('cancel-connect').hidden = !connecting; $('cancel-connect').disabled = !connecting || !session.connecting;
+  $('save-log').disabled = false;
   $('review').disabled = busy || !active() || !rows.some(p => p.selected);
   $('restart').disabled = busy || !active();
   $('baud').disabled = busy || active(); $('reset').disabled = busy || active();
@@ -41,10 +46,10 @@ function updateControls() {
     const row = rows[Number(button.dataset.backup)]; button.disabled = busy || !actualTarget(row);
   });
   $('selection-count').textContent = `已选 ${rows.filter(p => p.selected).length} 项`;
-  $('connection-state').textContent = busy ? '处理中' : active() ? '已连接' : '未连接';
+  $('connection-state').textContent = connecting ? (connectionStage || '选择串口') : busy ? '处理中' : active() ? '已连接' : '未连接';
   $('connection-state').className = `badge${active() ? ' connected' : ''}`;
   $('device-name').textContent = active() ? `${session.device.chip} · ${sizeLabel(session.device.flashSize)} Flash` : '通过 USB 连接你的 WhiteAI';
-  $('device-detail').textContent = active() ? '芯片与安全状态已确认 · 设备处于下载模式' : '先关闭串口监视器。连接操作会使设备进入下载模式。';
+  $('device-detail').textContent = active() ? '芯片与安全状态已确认 · 设备处于下载模式' : connecting ? '仅连接和读取信息，不会擦写 Flash。可随时取消。' : '先关闭串口监视器。连接操作会使设备进入下载模式。';
   const matches = active() && session.device.partitions && layout.length === session.device.partitions.length && layout.every(p => session.device.partitions.some(d => samePartition(p, d)));
   $('layout-status').textContent = `布局：${layoutName} · ${!active() ? '尚未与设备核对' : matches ? '与设备分区表一致' : session.device.partitions ? '与设备布局不同，刷写时将逐项校验' : '设备分区表无效，仅允许确认后的恢复部署'}`;
   $('layout-status').className = `layout-status${active() && !matches ? ' mismatch' : ''}`;
@@ -116,13 +121,29 @@ function download(data, name, type = 'text/plain;charset=utf-8') {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 $('connect').addEventListener('click', () => run(async () => {
-  result('请选择串口，正在连接并读取设备信息……');
-  // requestPort must run inside the user's click, before SDK/network awaits.
-  const port = await navigator.serial.requestPort();
-  const device = await session.connect(port, Number($('baud').value), $('reset').value);
-  log(`ESP32-S3 / ${sizeLabel(device.flashSize)} / esptool-js ${SDK_VERSION}`);
-  result(device.partitions ? '连接成功。设备分区表已读取；请添加所需的本地文件。' : `已连接，但设备分区表无效：${device.tableError}。请使用对应布局恢复部署。`, device.partitions ? 'success' : '');
+  connecting = true; connectionStage = '选择串口'; updateControls();
+  result('请选择串口。连接仅检查设备，不会写入 Flash。');
+  try {
+    // Must remain in the user's click; never reopen a chooser in a timer.
+    const port = await navigator.serial.requestPort();
+    const promise = session.connect(port, Number($('baud').value), $('reset').value);
+    updateControls();
+    const device = await promise;
+    log(`ESP32-S3 / ${sizeLabel(device.flashSize)} / esptool-js ${SDK_VERSION}`);
+    result(device.partitions ? '连接成功。设备分区表已读取；请添加所需的本地文件。' : `已连接，但设备分区表无效：${device.tableError}。请使用对应布局恢复部署。`, device.partitions ? 'success' : '');
+  } catch (error) {
+    if (error.name === 'NotFoundError') { result('未选择串口。'); return; }
+    if (!String(error.message).includes('连接已取消')) {
+      document.querySelector('.connection-settings').open = true;
+      document.querySelector('.logs').open = true;
+      throw new Error(`${error.message}。自动复位失败时，按住 BOOT（AI）并复位，松开后选择“已手动进入下载模式”重连。`);
+    }
+    throw error;
+  } finally { connecting = false; connectionStage = ''; }
 }));
+$('cancel-connect').addEventListener('click', () => {
+  if (session.cancelConnect()) { $('cancel-connect').disabled = true; result('正在取消连接并释放串口…'); }
+});
 $('disconnect').addEventListener('click', () => run(async () => { invalidate(); await session.disconnect(); result('已断开。设备可能仍在下载模式，可手动复位。'); }));
 $('restart').addEventListener('click', () => run(async () => {
   resetting = true;

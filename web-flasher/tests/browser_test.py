@@ -19,7 +19,7 @@ SDK = """
 import { mockSdk } from './tests/fixtures.mjs';
 const mock = mockSdk(); window.__mock = mock;
 export const SDK_VERSION = '0.7.0';
-export async function loadSdk() { return mock.sdk; }
+export async function loadSdk() { if (window.__holdSdk) await new Promise(resolve => { window.__releaseSdk=resolve; }); return mock.sdk; }
 """
 SERIAL = """
 window.__port = {getInfo: () => ({usbVendorId: 0x303a, usbProductId: 0x1001})};
@@ -179,6 +179,48 @@ def main():
         unsupported = no_serial.new_page(); load_page(unsupported, serial=False)
         expect(unsupported.locator('#support')).to_be_visible(); expect(unsupported.get_by_role('button', name='连接设备')).to_be_disabled()
         passed('unsupported browser displays instructions without a broken page')
+        # Regression: UI stays cancellable while the port or SDK is silent.
+        load_page(page)
+        page.evaluate("window.__holdSdk = true")
+        page.get_by_role('button', name='连接设备').click()
+        expect(page.locator('#connection-state')).to_have_text('加载刷机库')
+        expect(page.locator('#cancel-connect')).to_be_enabled()
+        page.locator('#cancel-connect').click()
+        expect(page.locator('#result')).to_contain_text('连接已取消')
+        expect(page.get_by_role('button', name='连接设备')).to_be_enabled()
+        page.evaluate("window.__holdSdk=false; window.__releaseSdk()")
+        assert page.evaluate('window.__mock.calls.options') is None
+        passed('cancel SDK loading; late module cannot open a stale port')
+        page.evaluate("window.__originalMain=window.__mock.sdk.ESPLoader.prototype.main; window.__mock.sdk.ESPLoader.prototype.main=()=>new Promise(resolve=>{window.__releaseMain=resolve}); void 0")
+        page.get_by_role('button', name='连接设备').click()
+        expect(page.locator('#connection-state')).to_have_text('下载模式握手')
+        expect(page.locator('#cancel-connect')).to_be_enabled()
+        expect(page.locator('#save-log')).to_be_enabled()
+        expect(page.locator('#review')).to_be_disabled()
+        page.locator('#cancel-connect').click()
+        expect(page.locator('#result')).to_contain_text('连接已取消')
+        page.evaluate("window.__releaseMain(); window.__mock.sdk.ESPLoader.prototype.main=window.__originalMain; void 0")
+        page.get_by_role('button', name='连接设备').click()
+        expect(page.locator('#connection-state')).to_have_text('已连接')
+        assert page.evaluate('window.__mock.calls.writes.length') == 0
+        passed('cancel handshake, retain diagnostics, reconnect without writing Flash')
+        page.get_by_role('button', name='断开', exact=True).click()
+        page.evaluate("window.__mock.sdk.ESPLoader.prototype.main=()=>new Promise(resolve=>{window.__releaseMain=resolve}); void 0")
+        page.get_by_role('button', name='连接设备').click()
+        expect(page.locator('#connection-state')).to_have_text('下载模式握手')
+        page.evaluate("const e=new Event('disconnect');Object.defineProperty(e,'port',{value:window.__port});navigator.serial.dispatchEvent(e)")
+        expect(page.locator('#result')).to_contain_text('USB 已断开')
+        expect(page.get_by_role('button', name='连接设备')).to_be_enabled()
+        page.evaluate('window.__releaseMain()')
+        expect(page.locator('#review')).to_be_disabled()
+        passed('unplug during connect releases UI; late success never enables flashing')
+        load_page(page)
+        page.evaluate("navigator.serial.requestPort=async()=>{throw new DOMException('No port','NotFoundError')}; void 0")
+        page.get_by_role('button', name='连接设备').click()
+        expect(page.locator('#result')).to_have_text('未选择串口。')
+        expect(page.get_by_role('button', name='连接设备')).to_be_enabled()
+        assert page.locator('.download-card').count() == 6
+        passed('native picker cancellation and all latest firmware links preserved')
         assert not errors, errors
         passed('no uncaught page errors throughout browser flow')
         browser.close()
