@@ -1,13 +1,13 @@
 name: Web flasher validation
 on:
   push:
-    branches: [codex/fix-web-serial, codex/ai-reader-home]
-    paths: ['web-flasher/**', '.github/workflows/web-flasher-validation.yml']
-  pull_request:
-    paths: ['web-flasher/**', '.github/workflows/web-flasher-validation.yml']
+    branches: [codex/fix-web-serial]
   workflow_dispatch:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 concurrency:
   group: web-flasher-${{ github.ref }}
   cancel-in-progress: true
@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Apply checksum-verified source patch
+        run: python3 .ci/apply-web-serial.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -28,20 +30,65 @@ jobs:
           path: pages-sdk
           sparse-checkout: vendor
           persist-credentials: false
-      - name: Export exact source and deployed SDK for regression reproduction
+      - name: Use exactly the deployed SDK
         run: |
-          git archive --format=zip --output=web-flasher-source.zip HEAD web-flasher partitions/v1/16m.csv AGENTS.md
-          mkdir -p web-flasher/vendor
+          mkdir -p web-flasher/vendor validation
           cp pages-sdk/vendor/* web-flasher/vendor/
           test "$(git hash-object web-flasher/vendor/esptool-js-0.7.0.bundle.js)" = '1ba8cad43b3ffb8c257de73a1a06e6702aa900ca'
-      - name: Flasher unit tests
+      - name: Core, session, actual SDK serial streams and library-loader regressions
         working-directory: web-flasher
-        run: npm test
+        run: npm test 2>&1 | tee ../validation/node.log
+      - name: SDK installer regressions
+        working-directory: web-flasher
+        run: python3 tests/vendor_test.py 2>&1 | tee ../validation/vendor.log
+      - name: Install browser test tools
+        run: |
+          python3 -m pip install playwright==1.58.0
+          python3 -m playwright install --with-deps chromium
+      - name: Real HTTP browser flows and page CSP
+        working-directory: web-flasher
+        run: |
+          CHROMIUM="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          python3 tests/browser_test.py --chromium "$CHROMIUM" --screenshots ../validation/screenshots 2>&1 | tee ../validation/browser.log
+          python3 ../.ci/sdk-browser-probe.py 2>&1 | tee ../validation/sdk-browser.log
+      - name: Export only validated ordinary source
+        run: |
+          git diff --check
+          git add web-flasher
+          git rev-parse "$(git write-tree):web-flasher" > validation/source-tree.txt
+          git diff --cached --binary > validation/validated-source.patch
+          sha256sum validation/validated-source.patch > validation/source.sha256
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: web-flasher-validation
-          path: |
-            web-flasher-source.zip
-            web-flasher/vendor/
+          path: validation/
           retention-days: 7
+  publish:
+    needs: host
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/fix-web-serial
+      - name: Verify branch has not moved
+        run: test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-flasher-validation
+          path: validation
+      - name: Commit tested web source on isolated branch
+        run: |
+          sha256sum --check validation/source.sha256
+          git apply --check validation/validated-source.patch
+          git apply validation/validated-source.patch
+          git add web-flasher
+          git diff --cached --check
+          test "$(git rev-parse "$(git write-tree):web-flasher")" = "$(cat validation/source-tree.txt)"
+          git config user.name 'WhiteAI validation'
+          git config user.email '116695909+446599@users.noreply.github.com'
+          git commit -m 'fix(web-flasher): bounded serial ownership and cancellable connection [skip ci]' -m 'Validated real SDK stream-error cleanup, original flash safety checks, browser flows and local SDK loading. Physical USB/flashing not exercised.'
+          git push origin HEAD:codex/fix-web-serial
