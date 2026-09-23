@@ -1,0 +1,47 @@
+name: Web flasher validation
+on:
+  push:
+    branches: [codex/fix-web-serial, codex/ai-reader-home]
+    paths: ['web-flasher/**', '.github/workflows/web-flasher-validation.yml']
+  pull_request:
+    paths: ['web-flasher/**', '.github/workflows/web-flasher-validation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: web-flasher-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/checkout@v4
+        with:
+          ref: 6e274d5db85a3e5559f2ce9eb5303d02f374232b
+          path: pages-sdk
+          sparse-checkout: vendor
+          persist-credentials: false
+      - name: Export exact source and deployed SDK for regression reproduction
+        run: |
+          git archive --format=zip --output=web-flasher-source.zip HEAD web-flasher partitions/v1/16m.csv AGENTS.md
+          mkdir -p web-flasher/vendor
+          cp pages-sdk/vendor/* web-flasher/vendor/
+          test "$(git hash-object web-flasher/vendor/esptool-js-0.7.0.bundle.js)" = '1ba8cad43b3ffb8c257de73a1a06e6702aa900ca'
+      - name: Flasher unit tests
+        working-directory: web-flasher
+        run: npm test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-flasher-validation
+          path: |
+            web-flasher-source.zip
+            web-flasher/vendor/
+          retention-days: 7
