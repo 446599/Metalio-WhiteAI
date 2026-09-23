@@ -1,13 +1,17 @@
 import { assertDevice, buildPlan, confirmPlan, parseTable, TABLE_OFFSET, SECTOR, number, samePartition, SYSTEM_TARGETS } from './core.mjs';
 import { md5, sha256 } from './hashes.mjs';
+import { bounded, SerialPortLease } from './serial-port.mjs';
 
 const equal = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
 /** Owns the serial port; all serial operations are mutually exclusive. */
 export class FlashSession {
-  constructor(loadSdk, log = () => {}) {
+  constructor(loadSdk, log = () => {}, options = {}) {
     this.loadSdk = loadSdk; this.log = log;
     this.device = null; this.transport = null; this.loader = null;
     this.port = null; this.busy = false; this.lost = false;
+    this.onStage = options.onStage || (() => {});
+    this.timeouts = { sdk: 15000, handshake: 35000, security: 8000, flash: 12000, table: 15000, close: 3000, ...options.timeouts };
+    this.lease = null; this.connecting = null;
   }
   async exclusive(work) {
     if (this.busy) throw new Error('设备忙，请等待当前操作完成');
@@ -15,44 +19,85 @@ export class FlashSession {
     try { return await work(); } finally { this.busy = false; }
   }
   async close() {
-    const transport = this.transport;
-    this.device = null; this.transport = null; this.loader = null; this.port = null;
-    if (transport) await transport.disconnect();
+    const transport = this.transport, lease = this.lease;
+    this.device = null; this.transport = null; this.loader = null; this.port = null; this.lease = null;
+    lease?.stop();
+    // Do not await the SDK's unbounded waitForUnlock loop. Our lease owns the
+    // native handles and closes them even when an SDK write rejected early.
+    const closing = [];
+    if (lease) closing.push(lease.dispose());
+    if (transport) closing.push(bounded(() => transport.disconnect(), this.timeouts.close, '释放串口'));
+    await Promise.all(closing);
+  }
+  cancelConnect() {
+    if (!this.connecting) return false; // Never expose cancellation during writes.
+    const error = new Error('连接已取消，未写入 Flash');
+    this.connecting.abort(error); this.lease?.stop(error); return true;
   }
   markLost(port) {
-    if (port === this.port) { this.lost = true; this.device = null; }
+    if (port === this.port) {
+      this.lost = true; this.device = null;
+      const error = new Error('USB 已断开；若复位后重新枚举，请重新选择串口');
+      this.connecting?.abort(error); this.lease?.stop(error);
+    }
   }
   async connect(port, baudrate = 115200, reset = 'default_reset') {
     return this.exclusive(async () => {
       if (this.transport) throw new Error('请先断开现有设备');
       if (![115200, 460800, 921600].includes(baudrate) || !['default_reset', 'no_reset'].includes(reset)) throw new Error('连接参数无效');
       this.port = port; this.lost = false;
+      const controller = new AbortController(); this.connecting = controller;
+      const stage = async (name, timeout, work) => {
+        controller.signal.throwIfAborted(); this.onStage(name); this.log(`连接阶段：${name}`);
+        const value = await bounded(work, timeout, name, controller.signal);
+        controller.signal.throwIfAborted(); return value;
+      };
       try {
-        const { ESPLoader, Transport } = await this.loadSdk();
-        if (this.lost) throw new Error('设备已断开');
-        this.transport = new Transport(port, false);
-        this.loader = new ESPLoader({ transport: this.transport, baudrate, romBaudrate: 115200,
-          debugLogging: false, terminal: { clean() {}, write: s => this.log(s), writeLine: s => this.log(s) } });
-        await this.loader.main(reset);
-        const security = await this.loader.getSecurityInfo();
-        const detected = await this.loader.detectFlashSize();
+        const { ESPLoader, Transport } = await stage('加载刷机库', this.timeouts.sdk, () => this.loadSdk());
+        this.lease = new SerialPortLease(port, { closeTimeout: this.timeouts.close, onStage: this.onStage });
+        this.transport = new Transport(this.lease, false);
+        const transport = this.transport;
+        transport.setDeviceLostCallback?.(() => {
+          if (this.transport === transport) this.markLost(port);
+        });
+        const info = port.getInfo?.() || {};
+        // Keep native USB-Serial/JTAG open rather than provoking a close/reopen
+        // and DTR/RTS transition just to change a USB line-coding baud value.
+        const nativeUsb = info.usbVendorId === 0x303a && info.usbProductId === 0x1001;
+        const effectiveBaud = nativeUsb ? 115200 : baudrate;
+        if (nativeUsb && baudrate !== effectiveBaud) this.log('原生 USB 使用 115200，避免切换波特率时重新打开端口');
+        const terminal = text => {
+          if (controller.signal.aborted) return;
+          this.log(text);
+          const value = String(text);
+          if (/Detecting chip|Chip is/.test(value)) this.onStage('识别芯片');
+          else if (/Uploading stub|Running stub/.test(value)) this.onStage('加载下载程序');
+          else if (/Connecting/.test(value)) this.onStage('进入下载模式');
+        };
+        this.loader = new ESPLoader({ transport: this.transport, baudrate: effectiveBaud, romBaudrate: 115200,
+          debugLogging: false, terminal: { clean() {}, write: terminal, writeLine: terminal } });
+        const loader = this.loader; // Never let a late completion touch a newer connection.
+        await stage('下载模式握手', this.timeouts.handshake, () => loader.main(reset));
+        const security = await stage('检查安全状态', this.timeouts.security, () => loader.getSecurityInfo());
+        const detected = await stage('读取 Flash 容量', this.timeouts.flash, () => loader.detectFlashSize());
         const match = /^(\d+)(MB|KB)$/.exec(detected || '');
         const flashSize = match ? Number(match[1]) * (match[2] === 'MB' ? 1048576 : 1024) : 0;
-        const device = { chip: this.loader.chip?.CHIP_NAME, flashSize, security, partitions: null, tableBytes: null, tableError: '' };
+        const device = { chip: loader.chip?.CHIP_NAME, flashSize, security, partitions: null, tableBytes: null, tableError: '' };
         assertDevice(device);
-        // A failed read is NOT equivalent to a blank table. Do not enable writes.
-        const bytes = await this.loader.readFlash(TABLE_OFFSET, SECTOR);
+        const bytes = await stage('读取分区表', this.timeouts.table, () => loader.readFlash(TABLE_OFFSET, SECTOR));
         if (!(bytes instanceof Uint8Array) || bytes.length !== SECTOR) throw new Error('设备分区表读取不完整');
         device.tableBytes = bytes.slice();
         try { device.partitions = parseTable(bytes, flashSize); }
         catch (error) { device.tableError = error.message; }
+        controller.signal.throwIfAborted();
         if (this.lost) throw new Error('设备已断开');
-        this.device = device;
-        return device;
+        this.device = device; return device;
       } catch (error) {
-        try { await this.close(); } catch { /* Preserve the original connection error. */ }
+        controller.abort(error); this.lease?.stop(error);
+        try { await this.close(); }
+        catch { this.log('串口尚未释放：请拔插 USB 后重试。'); }
         throw error;
-      }
+      } finally { this.connecting = null; }
     });
   }
   async disconnect() { return this.exclusive(() => this.close()); }

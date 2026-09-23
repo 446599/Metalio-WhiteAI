@@ -1,0 +1,61 @@
+name: Web flasher validation
+on:
+  push:
+    branches: [codex/ai-reader-home]
+    paths: ['web-flasher/**', 'partitions/**', '.github/workflows/web-flasher-validation.yml']
+  pull_request:
+    paths: ['web-flasher/**', 'partitions/**', '.github/workflows/web-flasher-validation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: web-flasher-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Match the site's deployed esptool-js, rather than trusting mock Transport.
+      - uses: actions/checkout@v4
+        with:
+          ref: 6e274d5db85a3e5559f2ce9eb5303d02f374232b
+          path: pages-sdk
+          sparse-checkout: vendor
+          persist-credentials: false
+      - name: Verify the pinned SDK
+        run: |
+          mkdir -p web-flasher/vendor validation
+          cp pages-sdk/vendor/* web-flasher/vendor/
+          test "$(git hash-object web-flasher/vendor/esptool-js-0.7.0.bundle.js)" = '1ba8cad43b3ffb8c257de73a1a06e6702aa900ca'
+      - name: Flasher and actual SDK stream regressions
+        working-directory: web-flasher
+        run: npm test 2>&1 | tee ../validation/node.log
+      - name: SDK installer regressions
+        working-directory: web-flasher
+        run: python3 tests/vendor_test.py 2>&1 | tee ../validation/vendor.log
+      - name: Install browser test tools
+        run: |
+          python3 -m pip install playwright==1.58.0
+          python3 -m playwright install --with-deps chromium
+      - name: Browser flows and real local SDK import
+        working-directory: web-flasher
+        run: |
+          CHROMIUM="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          python3 tests/browser_test.py --chromium "$CHROMIUM" --screenshots ../validation/screenshots 2>&1 | tee ../validation/browser.log
+          python3 tests/sdk_browser_test.py 2>&1 | tee ../validation/sdk-browser.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-flasher-validation
+          path: validation/
+          retention-days: 7
